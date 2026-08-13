@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "local": {
     "currentProjectsRoot": "D:\\AI项目管理\\01-当前项目",
-    "pausedProjectsRoot": "D:\\AI项目管理\\02-暂停项目"
+    "pausedProjectsRoot": "D:\\AI项目管理\\02-暂停项目",
+    "additionalRoots": []
   },
   "portableDrive": {
     "driveLetter": "T:",

@@ -5,23 +5,28 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaVersion",
-    "projectId",
-    "projectName",
-    "status",
-    "createdAt",
-    "updatedAt"
+    "schema_version",
+    "project_id",
+    "project_name",
+    "revision",
+    "official_location",
+    "state",
+    "last_computer",
+    "last_operation",
+    "last_updated"
   ],
   "properties": {
-    "schemaVersion": { "type": "integer", "const": 1 },
-    "projectId": { "type": "string", "format": "uuid" },
-    "projectName": { "type": "string", "minLength": 1 },
-    "status": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "project_id": { "type": "string", "format": "uuid" },
+    "project_name": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "official_location": { "type": "string", "minLength": 1 },
+    "state": {
       "type": "string",
-      "enum": ["current", "paused", "checked-in", "checked-out", "cleanup-pending", "completed"]
+      "enum": ["local_active", "local_paused", "on_t9", "completed_on_t9", "transfer_incomplete", "cleanup_pending", "conflict"]
     },
-    "location": { "type": "string" },
-    "createdAt": { "type": "string", "format": "date-time" },
-    "updatedAt": { "type": "string", "format": "date-time" }
+    "last_computer": { "type": "string" },
+    "last_operation": { "type": "string" },
+    "last_updated": { "type": "string", "format": "date-time" }
   }
 }
