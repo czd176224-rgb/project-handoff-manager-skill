@@ -1,0 +1,36 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -MinimumVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run Pester
+        shell: pwsh
+        run: Invoke-Pester -Path ./tests -CI -Output Detailed
+
+      - name: Validate Skill
+        shell: pwsh
+        run: |
+          $valid = ./scripts/validate_skill.ps1 -SkillPath ./project-handoff-manager
+          if (-not $valid) { throw 'Skill validation failed' }
+
+      - name: Scan public files for private data patterns
+        shell: pwsh
+        run: |
+          $patterns = @('C:\\Users\\[A-Za-z0-9._-]+', 'gho_[A-Za-z0-9_]+', 'github_pat_[A-Za-z0-9_]+', 'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY')
+          $files = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
+          foreach ($pattern in $patterns) {
+            $matches = Select-String -Path $files -Pattern $pattern -ErrorAction SilentlyContinue
+            if ($matches) { $matches | Format-Table; throw "Private-data pattern found: $pattern" }
+          }
