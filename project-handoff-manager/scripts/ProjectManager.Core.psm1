@@ -6,7 +6,7 @@ function Get-PHMVersion {
 
     [pscustomobject]@{
         Name          = 'project-handoff-manager'
-        Version       = '0.1.0'
+        Version       = '1.0.0'
         SchemaVersion = 1
     }
 }
@@ -1233,6 +1233,7 @@ function New-PHMCheckinPlan {
         [Parameter(Mandatory)]$DriveInfo,
         [object[]]$ProcessRecords,
         [switch]$AllowSensitiveFiles,
+        [scriptblock]$PathSafetyProvider,
         [string]$ExpectedDriveLetter = 'T:',
         [string]$ExpectedVolumeLabel = 'T9',
         [string]$ExpectedFileSystem = 'NTFS',
@@ -1258,6 +1259,14 @@ function New-PHMCheckinPlan {
     $receivingPath = Join-Path $PortableRepositoryRoot "正在接收\$projectId\$projectName"
     $officialPath = Join-Path $PortableRepositoryRoot "暂停项目\$projectName"
     $blockers = @($driveValidation.Blockers)
+    if (-not (Test-PHMPathOnValidatedDrive -Path $PortableRepositoryRoot -DriveInfo $DriveInfo)) {
+        $blockers += '项目仓库不在已验证 DriveInfo.DriveLetter 所指向的卷上。'
+    }
+    foreach ($portablePath in @($PortableRepositoryRoot, (Join-Path $PortableRepositoryRoot '正在接收'), $receivingPath, (Join-Path $PortableRepositoryRoot '暂停项目'), $officialPath)) {
+        if (-not (Test-PHMPathChainSafe -Path $portablePath -PathSafetyProvider $PathSafetyProvider)) {
+            $blockers += "T9 路径链包含重解析点或无法验证：$portablePath"
+        }
+    }
     if ($inventory.ReparsePoints.Count -gt 0) { $blockers += "发现 $($inventory.ReparsePoints.Count) 个重解析点；为防止复制项目外内容，归还已阻断。" }
     if ($inventory.Unreadable.Count -gt 0) { $blockers += "发现 $($inventory.Unreadable.Count) 个无法读取的文件或目录。" }
     if (Test-Path -LiteralPath $receivingPath) { $blockers += "临时接收目录已存在：$receivingPath。请先修复未完成转移。" }
@@ -1440,14 +1449,21 @@ function Invoke-PHMCheckin {
         [scriptblock]$ProcessStopper,
         [scriptblock]$CopyAction,
         [scriptblock]$RegistryWriter,
+        [scriptblock]$PathSafetyProvider,
         [string]$ComputerName = $env:COMPUTERNAME,
+        [string]$ExpectedDriveLetter = 'T:',
+        [string]$ExpectedVolumeLabel = 'T9',
+        [string]$ExpectedFileSystem = 'NTFS',
+        [string]$ExpectedFriendlyName = 'Samsung PSSD T9',
         [string]$ExpectedVolumeSerial,
         [string]$ExpectedDeviceId
     )
 
     $planParameters = @{
         ProjectPath=$ProjectPath; PortableRepositoryRoot=$PortableRepositoryRoot; DriveInfo=$DriveInfo
-        AllowSensitiveFiles=$AllowSensitiveFiles; ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
+        AllowSensitiveFiles=$AllowSensitiveFiles; PathSafetyProvider=$PathSafetyProvider
+        ExpectedDriveLetter=$ExpectedDriveLetter; ExpectedVolumeLabel=$ExpectedVolumeLabel; ExpectedFileSystem=$ExpectedFileSystem; ExpectedFriendlyName=$ExpectedFriendlyName
+        ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
     }
     if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $planParameters.ProcessRecords = @($ProcessRecords) }
     $plan = New-PHMCheckinPlan @planParameters
@@ -1471,7 +1487,9 @@ function Invoke-PHMCheckin {
 
     $executionPlanParameters = @{
         ProjectPath=$ProjectPath; PortableRepositoryRoot=$PortableRepositoryRoot; DriveInfo=$DriveInfo
-        AllowSensitiveFiles=$AllowSensitiveFiles; ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
+        AllowSensitiveFiles=$AllowSensitiveFiles; PathSafetyProvider=$PathSafetyProvider
+        ExpectedDriveLetter=$ExpectedDriveLetter; ExpectedVolumeLabel=$ExpectedVolumeLabel; ExpectedFileSystem=$ExpectedFileSystem; ExpectedFriendlyName=$ExpectedFriendlyName
+        ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
     }
     if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $executionPlanParameters.ProcessRecords = @() }
     $plan = New-PHMCheckinPlan @executionPlanParameters
@@ -1567,14 +1585,44 @@ function Complete-PHMCheckinCleanup {
     param(
         [Parameter(Mandatory)][string]$SourcePath,
         [Parameter(Mandatory)][string]$TargetPath,
+        [Parameter(Mandatory)][string]$PortableRepositoryRoot,
+        [Parameter(Mandatory)]$DriveInfo,
         [switch]$ConfirmCleanup,
-        [string[]]$ProtectedRoots = @()
+        [string[]]$ProtectedRoots = @(),
+        [scriptblock]$PathSafetyProvider,
+        [string]$ExpectedDriveLetter = 'T:',
+        [string]$ExpectedVolumeLabel = 'T9',
+        [string]$ExpectedFileSystem = 'NTFS',
+        [string]$ExpectedFriendlyName = 'Samsung PSSD T9',
+        [Parameter(Mandatory)][string]$ExpectedVolumeSerial,
+        [Parameter(Mandatory)][string]$ExpectedDeviceId
     )
 
     $sourceFull = if (Test-Path -LiteralPath $SourcePath) { (Get-Item -LiteralPath $SourcePath).FullName } else { [System.IO.Path]::GetFullPath($SourcePath) }
     $targetFull = if (Test-Path -LiteralPath $TargetPath) { (Get-Item -LiteralPath $TargetPath).FullName } else { [System.IO.Path]::GetFullPath($TargetPath) }
+    $repositoryRoot = [System.IO.Path]::GetFullPath($PortableRepositoryRoot).TrimEnd('\')
+    $pausedRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot '暂停项目')).TrimEnd('\')
+    $targetParent = [System.IO.Path]::GetFullPath((Split-Path $targetFull -Parent)).TrimEnd('\')
+    $driveValidation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName -ExpectedVolumeSerial $ExpectedVolumeSerial -ExpectedDeviceId $ExpectedDeviceId
     if (-not $ConfirmCleanup) {
-        return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$true; SourcePath=$sourceFull; TargetPath=$targetFull; ExpectedResult='删除本机来源后，T9 成为唯一正式完整副本。' }
+        return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$true; SourcePath=$sourceFull; TargetPath=$targetFull; PortableRepositoryRoot=$repositoryRoot; DriveValidation=$driveValidation; ExpectedResult='复核设备身份、仓库边界、路径链和转移凭证后删除本机来源，使 T9 成为唯一正式完整副本。' }
+    }
+    if ($sourceFull.Equals($targetFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Executed=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason='本机来源与 T9 目标不能是同一路径。' }
+    }
+    if (-not $driveValidation.IsValid) {
+        return [pscustomobject]@{ Executed=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason="设备或磁盘校验失败：$($driveValidation.Blockers -join '；')" }
+    }
+    if (-not (Test-PHMPathOnValidatedDrive -Path $repositoryRoot -DriveInfo $DriveInfo) -or -not (Test-PHMPathOnValidatedDrive -Path $targetFull -DriveInfo $DriveInfo)) {
+        return [pscustomobject]@{ Executed=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason='T9 目标或项目仓库不在已验证 DriveInfo.DriveLetter 所指向的卷上。' }
+    }
+    foreach ($portablePath in @($repositoryRoot, $pausedRoot, $targetFull)) {
+        if (-not (Test-PHMPathChainSafe -Path $portablePath -PathSafetyProvider $PathSafetyProvider)) {
+            return [pscustomobject]@{ Executed=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason="T9 路径链包含重解析点或无法验证：$portablePath" }
+        }
+    }
+    if (-not $targetParent.Equals($pausedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $targetFull.Equals($pausedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Executed=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason='目标必须是 PortableRepositoryRoot\暂停项目 下的直接子目录。' }
     }
     if (-not (Test-PHMDeletionPath -Path $sourceFull -ProtectedRoots $ProtectedRoots)) {
         return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason='来源路径受删除保护。' }
@@ -1607,7 +1655,6 @@ function Complete-PHMCheckinCleanup {
     Remove-Item -LiteralPath $sourceFull -Recurse -Force -ErrorAction Stop
     $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -Operation 'checkin-cleanup' -State 'on_t9' -OfficialLocation $targetFull
     Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -ActionLabel '完成归还并清理本机来源' -Changes (New-PHMEmptyChanges) -ValidationResult 'T9 为唯一正式完整副本。' | Out-Null
-    $repositoryRoot = Split-Path (Split-Path $targetFull -Parent) -Parent
     $registryPath = Get-PHMRegistryPathFromRepository -PortableRepositoryRoot $repositoryRoot
     $record = [pscustomobject]@{ projectId=[string]$identity.project_id; projectName=[string]$identity.project_name; state='on_t9'; location=$targetFull; updatedAt=(Get-Date).ToUniversalTime().ToString('o') }
     Write-PHMRegistry -RegistryPath $registryPath -Record $record | Out-Null

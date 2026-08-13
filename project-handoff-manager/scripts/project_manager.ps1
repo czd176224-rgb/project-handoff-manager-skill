@@ -94,17 +94,6 @@ if ($Action -eq 'pause') {
 
 if ($Action -eq 'checkin') {
     if (-not $ProjectPath) { throw "操作 'checkin' 必须提供 -ProjectPath。" }
-    if ($ConfirmCleanup) {
-        if (-not $TargetPath) { throw "完成归还清理必须提供 -TargetPath。" }
-        $cleanup = Complete-PHMCheckinCleanup -SourcePath $ProjectPath -TargetPath $TargetPath -ConfirmCleanup
-        [pscustomobject]@{
-            safeMode=$true; executed=[bool]$cleanup.Executed; action='checkin-cleanup'
-            message=if($cleanup.Executed){'本机来源已清理，T9 是唯一正式完整副本。'}else{'未清理来源；请查看阻断原因。'}
-            result=$cleanup
-        } | ConvertTo-Json -Depth 12
-        exit 0
-    }
-
     $loadedConfig = if ($ConfigPath) { Read-PHMConfig -Path $ConfigPath } else { $null }
     if (-not $PortableRepositoryRoot -and $loadedConfig) { $PortableRepositoryRoot = $loadedConfig.PortableRepositoryRoot }
     if (-not $PortableRepositoryRoot) { throw "操作 'checkin' 必须提供 -PortableRepositoryRoot 或包含该路径的 -ConfigPath。" }
@@ -115,10 +104,28 @@ if ($Action -eq 'checkin') {
     $expectedFriendlyName = if ($portableConfig -and $portableConfig.friendlyName) { [string]$portableConfig.friendlyName } else { 'Samsung PSSD T9' }
     $expectedVolumeSerial = if ($portableConfig -and $portableConfig.volumeSerial) { [string]$portableConfig.volumeSerial } else { $null }
     $expectedDeviceId = if ($portableConfig -and $portableConfig.deviceId) { [string]$portableConfig.deviceId } else { $null }
+    if (-not $LocalTrustPath -and $portableConfig -and $portableConfig.localTrustPath) { $LocalTrustPath = [string]$portableConfig.localTrustPath }
+    if ((-not $expectedVolumeSerial -or -not $expectedDeviceId) -and $LocalTrustPath -and (Test-Path -LiteralPath $LocalTrustPath -PathType Leaf)) {
+        $trust = Get-Content -LiteralPath $LocalTrustPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $expectedVolumeSerial) { $expectedVolumeSerial = [string]$trust.volume_serial }
+        if (-not $expectedDeviceId) { $expectedDeviceId = [string]$trust.device_id }
+    }
     $markerPath = if ($portableConfig -and $portableConfig.deviceMarkerPath) { [string]$portableConfig.deviceMarkerPath } else { Join-Path $PortableRepositoryRoot '..\管理资料\项目管家设备.json' }
     if (-not $DriveInfo) { $DriveInfo = Get-PHMPortableDriveInfo -DriveLetter $expectedLetter -DeviceMarkerPath $markerPath }
 
-    $result = Invoke-PHMCheckin -ProjectPath $ProjectPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ConfirmTransfer:$ConfirmTransfer -ConfirmProcessStop:$ConfirmProcessStop -AllowSensitiveFiles:$AllowSensitiveFiles -ComputerName $ComputerName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
+    if ($ConfirmCleanup) {
+        if (-not $TargetPath) { throw "完成归还清理必须提供 -TargetPath。" }
+        if (-not $expectedVolumeSerial -or -not $expectedDeviceId) { throw '完成归还清理缺少本机 T9 设备信任记录。' }
+        $cleanup = Complete-PHMCheckinCleanup -SourcePath $ProjectPath -TargetPath $TargetPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ConfirmCleanup -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
+        [pscustomobject]@{
+            safeMode=$true; executed=[bool]$cleanup.Executed; action='checkin-cleanup'
+            message=if($cleanup.Executed){'本机来源已清理，T9 是唯一正式完整副本。'}else{'未清理来源；请查看阻断原因。'}
+            result=$cleanup
+        } | ConvertTo-Json -Depth 12
+        exit 0
+    }
+
+    $result = Invoke-PHMCheckin -ProjectPath $ProjectPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ConfirmTransfer:$ConfirmTransfer -ConfirmProcessStop:$ConfirmProcessStop -AllowSensitiveFiles:$AllowSensitiveFiles -ComputerName $ComputerName -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
     [pscustomobject]@{
         safeMode=$true; executed=[bool]$result.Executed; requiresConfirmation=[bool](-not $ConfirmTransfer); action='checkin'
         message=if($result.Executed){'目标已经校验并提交；本机来源仍保留，需单独确认清理。'}else{'尚未完成归还；请查看预览、确认项或失败阶段。'}

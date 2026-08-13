@@ -8,7 +8,7 @@ Describe '公开仓库安全边界' {
         Test-Path -LiteralPath $configPath | Should -BeTrue
         $content = Get-Content -LiteralPath $configPath -Raw
 
-        $content | Should -Not -Match 'C:\\Users\\24927'
+        $content | Should -Not -Match 'C:\\Users\\[^\\]+'
         $content | Should -Not -Match 'Documents\\Codex'
     }
 
