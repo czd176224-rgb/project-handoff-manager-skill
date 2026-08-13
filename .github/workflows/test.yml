@@ -25,11 +25,32 @@ jobs:
           $valid = ./scripts/validate_skill.ps1 -SkillPath ./project-handoff-manager
           if (-not $valid) { throw 'Skill validation failed' }
 
+      - name: Install and verify in an isolated directory
+        shell: pwsh
+        run: |
+          $destinationRoot = Join-Path $env:RUNNER_TEMP 'codex-skills'
+          ./scripts/install.ps1 -DestinationRoot $destinationRoot
+          ./scripts/verify_install.ps1 -DestinationRoot $destinationRoot
+
+      - name: Windows PowerShell 5.1 smoke
+        shell: powershell
+        run: |
+          $destinationRoot = Join-Path $env:RUNNER_TEMP 'codex-skills-ps51'
+          .\scripts\install.ps1 -DestinationRoot $destinationRoot
+          .\scripts\verify_install.ps1 -DestinationRoot $destinationRoot
+
       - name: Scan public files for private data patterns
         shell: pwsh
         run: |
-          $patterns = @('C:\\Users\\[A-Za-z0-9._-]+', 'gho_[A-Za-z0-9_]+', 'github_pat_[A-Za-z0-9_]+', 'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY')
+          $patterns = @(
+            'C:\\Users\\[A-Za-z0-9._-]+',
+            '(?i)(gho|ghp|github_pat)_[A-Za-z0-9_]+',
+            '(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["'']?(?!test|example|dummy|simulated)[^\s"'']{8,}',
+            'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY'
+          )
           $files = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
+          $forbiddenFiles = $files | Where-Object { $_.Name -match '(?i)^(local\.config\.json|项目管家设备信任\.json|项目管家设备\.json|.*\.secrets\.json|credentials.*\.json)$' }
+          if ($forbiddenFiles) { $forbiddenFiles | Format-Table FullName; throw 'Local configuration, trust, device identity, or secrets file found' }
           foreach ($pattern in $patterns) {
             $matches = Select-String -Path $files -Pattern $pattern -ErrorAction SilentlyContinue
             if ($matches) { $matches | Format-Table; throw "Private-data pattern found: $pattern" }

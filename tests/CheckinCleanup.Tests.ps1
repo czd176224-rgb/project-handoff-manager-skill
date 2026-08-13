@@ -2,10 +2,12 @@ Describe '归还后的独立来源清理' {
     BeforeAll {
         $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'project-handoff-manager\scripts\ProjectManager.Core.psm1'
         Import-Module $modulePath -Force
+        $script:CleanupDriveLetter = [System.IO.Path]::GetPathRoot($TestDrive).TrimEnd('\')
+        $PSDefaultParameterValues['Invoke-PHMCheckin:ExpectedDriveLetter'] = $script:CleanupDriveLetter
 
         function New-CleanupDriveInfo {
             [pscustomobject]@{
-                DriveLetter='T:'; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
+                DriveLetter=$script:CleanupDriveLetter; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
                 OperationalStatus='OK'; IsReadOnly=$false; IsOffline=$false; FreeBytes=100GB
                 FriendlyName='Samsung PSSD T9'; VolumeSerial='TEST1234'; DeviceId='test-device'
             }
@@ -26,7 +28,7 @@ Describe '归还后的独立来源清理' {
     It '未明确确认时只显示精确删除路径和预期结果' {
         $pending = New-PendingCheckin -Name '清理预览'
 
-        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target
+        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target -PortableRepositoryRoot $pending.Repository -DriveInfo (New-CleanupDriveInfo) -ExpectedDriveLetter $script:CleanupDriveLetter -ExpectedVolumeSerial TEST1234 -ExpectedDeviceId test-device
 
         $result.Executed | Should -BeFalse
         $result.RequiresConfirmation | Should -BeTrue
@@ -38,7 +40,7 @@ Describe '归还后的独立来源清理' {
     It '确认且来源未变化时删除本机来源并把 T9 状态更新为 on_t9' {
         $pending = New-PendingCheckin -Name '完成清理'
 
-        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target -ConfirmCleanup
+        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target -PortableRepositoryRoot $pending.Repository -DriveInfo (New-CleanupDriveInfo) -ExpectedDriveLetter $script:CleanupDriveLetter -ExpectedVolumeSerial TEST1234 -ExpectedDeviceId test-device -ConfirmCleanup
         $targetIdentity = Get-Content -LiteralPath (Join-Path $pending.Target '项目交接\项目身份.json') -Raw | ConvertFrom-Json
 
         $result.Executed | Should -BeTrue
@@ -52,12 +54,31 @@ Describe '归还后的独立来源清理' {
         $pending = New-PendingCheckin -Name '变化后清理'
         Set-Content -LiteralPath (Join-Path $pending.Source '新材料.txt') -Value 'new' -Encoding utf8
 
-        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target -ConfirmCleanup
+        $result = Complete-PHMCheckinCleanup -SourcePath $pending.Source -TargetPath $pending.Target -PortableRepositoryRoot $pending.Repository -DriveInfo (New-CleanupDriveInfo) -ExpectedDriveLetter $script:CleanupDriveLetter -ExpectedVolumeSerial TEST1234 -ExpectedDeviceId test-device -ConfirmCleanup
 
         $result.Executed | Should -BeFalse
         $result.BlockedReason | Should -Match '发生变化'
         Test-Path -LiteralPath $pending.Source | Should -BeTrue
         Test-Path -LiteralPath $pending.Target | Should -BeTrue
+    }
+
+    It '错误仓库、路径链异常与相同路径均阻止删除来源' {
+        $pending = New-PendingCheckin -Name '边界阻断'
+        $wrongRepository = Join-Path $TestDrive '其他仓库'
+        New-Item -ItemType Directory -Path $wrongRepository -Force | Out-Null
+        $common = @{ SourcePath=$pending.Source; TargetPath=$pending.Target; DriveInfo=(New-CleanupDriveInfo); ExpectedDriveLetter=$script:CleanupDriveLetter; ExpectedVolumeSerial='TEST1234'; ExpectedDeviceId='test-device'; ConfirmCleanup=$true }
+
+        $wrong = Complete-PHMCheckinCleanup @common -PortableRepositoryRoot $wrongRepository
+        $unsafe = Complete-PHMCheckinCleanup @common -PortableRepositoryRoot $pending.Repository -PathSafetyProvider { param($path) $false }
+        $same = Complete-PHMCheckinCleanup -SourcePath $pending.Target -TargetPath $pending.Target -PortableRepositoryRoot $pending.Repository -DriveInfo (New-CleanupDriveInfo) -ExpectedDriveLetter $script:CleanupDriveLetter -ExpectedVolumeSerial TEST1234 -ExpectedDeviceId test-device -ConfirmCleanup
+
+        $wrong.Executed | Should -BeFalse
+        $wrong.BlockedReason | Should -Match '直接子目录'
+        $unsafe.Executed | Should -BeFalse
+        $unsafe.BlockedReason | Should -Match '路径链包含重解析点'
+        $same.Executed | Should -BeFalse
+        $same.BlockedReason | Should -Match '不能是同一路径'
+        Test-Path -LiteralPath $pending.Source | Should -BeTrue
     }
 
     It '删除保护拒绝盘符根目录、用户目录和指定项目管理根目录' {

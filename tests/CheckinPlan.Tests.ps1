@@ -2,14 +2,44 @@ Describe '归还 T9 执行计划' {
     BeforeAll {
         $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'project-handoff-manager\scripts\ProjectManager.Core.psm1'
         Import-Module $modulePath -Force
+        $script:CheckinDriveLetter = [System.IO.Path]::GetPathRoot($TestDrive).TrimEnd('\')
+        $PSDefaultParameterValues['New-PHMCheckinPlan:ExpectedDriveLetter'] = $script:CheckinDriveLetter
 
         function New-CheckinDriveInfo {
             [pscustomobject]@{
-                DriveLetter='T:'; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
+                DriveLetter=$script:CheckinDriveLetter; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
                 OperationalStatus='OK'; IsReadOnly=$false; IsOffline=$false; FreeBytes=100GB
                 FriendlyName='Samsung PSSD T9'; VolumeSerial='TEST1234'; DeviceId='test-device'
             }
         }
+    }
+
+    It '仓库位于错误卷时拒绝执行' {
+        $project = Join-Path $TestDrive '错误卷项目'
+        $repository = Join-Path $TestDrive '错误卷仓库'
+        New-Item -ItemType Directory -Path $project,$repository -Force | Out-Null
+        Initialize-PHMProject -ProjectPath $project | Out-Null
+        $drive = New-CheckinDriveInfo
+        $drive.DriveLetter = 'Z:'
+
+        $plan = New-PHMCheckinPlan -ProjectPath $project -PortableRepositoryRoot $repository -DriveInfo $drive -ExpectedDriveLetter 'Z:' -ProcessRecords @()
+
+        $plan.CanExecute | Should -BeFalse
+        $plan.Blockers -join '；' | Should -Match '项目仓库不在已验证'
+    }
+
+    It '仓库路径链包含目录联接时拒绝执行' {
+        $project = Join-Path $TestDrive '仓库联接项目'
+        $realRepository = Join-Path $TestDrive '真实仓库'
+        $junctionRepository = Join-Path $TestDrive '联接仓库入口'
+        New-Item -ItemType Directory -Path $project,$realRepository -Force | Out-Null
+        Initialize-PHMProject -ProjectPath $project | Out-Null
+        New-Item -ItemType Junction -Path $junctionRepository -Target $realRepository | Out-Null
+
+        $plan = New-PHMCheckinPlan -ProjectPath $project -PortableRepositoryRoot $junctionRepository -DriveInfo (New-CheckinDriveInfo) -ProcessRecords @()
+
+        $plan.CanExecute | Should -BeFalse
+        $plan.Blockers -join '；' | Should -Match '路径链包含重解析点'
     }
 
     It '生成源、暂存、正式路径和完整项目文件清单但不复制' {

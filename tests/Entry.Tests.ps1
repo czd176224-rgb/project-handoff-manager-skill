@@ -68,12 +68,15 @@ Describe '项目管家入口' {
         $repository = Join-Path $TestDrive '入口项目仓库'
         New-Item -ItemType Directory -Path $project,$repository -Force | Out-Null
         & $entryPath -Action adopt -ProjectPath $project | Out-Null
+        $driveLetter = [System.IO.Path]::GetPathRoot($TestDrive).TrimEnd('\')
         $drive = [pscustomobject]@{
-            DriveLetter='T:';VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
+            DriveLetter=$driveLetter;VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
             IsReadOnly=$false;IsOffline=$false;FreeBytes=100GB;FriendlyName='Samsung PSSD T9';VolumeSerial='TEST';DeviceId='TEST'
         }
+        $configPath = Join-Path $TestDrive 'checkin-entry-config.json'
+        @{schemaVersion=1;local=@{};portableDrive=@{driveLetter=$driveLetter;volumeLabel='T9';requiredFileSystem='NTFS';friendlyName='Samsung PSSD T9';repositoryRoot=$repository;volumeSerial='TEST';deviceId='TEST'}} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
 
-        $preview = & $entryPath -Action checkin -ProjectPath $project -PortableRepositoryRoot $repository -DriveInfo $drive | ConvertFrom-Json
+        $preview = & $entryPath -Action checkin -ProjectPath $project -ConfigPath $configPath -DriveInfo $drive | ConvertFrom-Json
 
         $preview.executed | Should -BeFalse
         $preview.requiresConfirmation | Should -BeTrue

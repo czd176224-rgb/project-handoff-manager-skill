@@ -10,7 +10,7 @@ Describe '项目管家核心模块' {
         $versionInfo = Get-PHMVersion
 
         $versionInfo.Name | Should -Be 'project-handoff-manager'
-        $versionInfo.Version | Should -Match '^0\.1\.0$'
+        $versionInfo.Version | Should -Be '1.0.0'
         $versionInfo.SchemaVersion | Should -Be 1
     }
 

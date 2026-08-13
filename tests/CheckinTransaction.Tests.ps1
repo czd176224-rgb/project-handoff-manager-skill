@@ -2,10 +2,12 @@ Describe '事务式归还 T9' {
     BeforeAll {
         $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'project-handoff-manager\scripts\ProjectManager.Core.psm1'
         Import-Module $modulePath -Force
+        $script:TransactionDriveLetter = [System.IO.Path]::GetPathRoot($TestDrive).TrimEnd('\')
+        $PSDefaultParameterValues['Invoke-PHMCheckin:ExpectedDriveLetter'] = $script:TransactionDriveLetter
 
         function New-TransactionDriveInfo {
             [pscustomobject]@{
-                DriveLetter='T:'; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
+                DriveLetter=$script:TransactionDriveLetter; VolumeLabel='T9'; FileSystem='NTFS'; HealthStatus='Healthy'
                 OperationalStatus='OK'; IsReadOnly=$false; IsOffline=$false; FreeBytes=100GB
                 FriendlyName='Samsung PSSD T9'; VolumeSerial='TEST1234'; DeviceId='test-device'
             }
