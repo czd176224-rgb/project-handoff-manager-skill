@@ -13,5 +13,6 @@ __pycache__/
 TestResults/
 coverage/
 artifacts/
+.superpowers/
 local.config.json
 *.secrets.json

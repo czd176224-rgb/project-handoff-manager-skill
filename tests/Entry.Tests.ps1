@@ -13,11 +13,8 @@ Describe '项目管家入口' {
         $result.message | Should -Match '执行前'
     }
 
-    It '未实现操作不会执行文件变更' {
-        $result = & $entryPath -Action checkout | ConvertFrom-Json
-
-        $result.executed | Should -BeFalse
-        $result.message | Should -Match '尚未实现'
+    It 'checkout 已实现且缺少 T9 项目路径时安全拒绝' {
+        { & $entryPath -Action checkout } | Should -Throw '*必须提供 -ProjectPath*'
     }
 
     It 'inspect 使用配置文件列出本机和移动盘项目' {
@@ -83,5 +80,87 @@ Describe '项目管家入口' {
         $preview.result.Plan.SourcePath | Should -Be (Get-Item $project).FullName
         Test-Path -LiteralPath $preview.result.OfficialPath | Should -BeFalse
         Test-Path -LiteralPath $project | Should -BeTrue
+    }
+
+    It 'checkout 第一次只显示完整借出计划且不复制或删除' {
+        $repository = Join-Path $TestDrive '借出入口仓库'
+        $project = Join-Path $repository '暂停项目\借出入口项目'
+        $currentRoot = Join-Path $TestDrive '借出当前'
+        $receivingRoot = Join-Path $TestDrive '借出接收'
+        New-Item -ItemType Directory -Path $project -Force | Out-Null
+        & $entryPath -Action adopt -ProjectPath $project | Out-Null
+        $drive = [pscustomobject]@{
+            DriveLetter='T:';VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
+            IsReadOnly=$false;IsOffline=$false;FreeBytes=100GB;FriendlyName='Samsung PSSD T9';VolumeSerial='TEST';DeviceId='TEST'
+        }
+
+        $preview = & $entryPath -Action checkout -ProjectPath $project -PortableRepositoryRoot $repository -LocalCurrentRoot $currentRoot -LocalReceivingRoot $receivingRoot -DriveInfo $drive | ConvertFrom-Json
+
+        $preview.executed | Should -BeFalse
+        $preview.requiresConfirmation | Should -BeTrue
+        $preview.result.Plan.SourcePath | Should -Be (Get-Item $project).FullName
+        Test-Path -LiteralPath $preview.result.OfficialPath | Should -BeFalse
+        Test-Path -LiteralPath $project | Should -BeTrue
+    }
+
+    It 'checkout 入口把配置中的文件系统和设备型号传入磁盘校验' {
+        $repository = Join-Path $TestDrive '入口配置校验仓库'
+        $project = Join-Path $repository '暂停项目\配置校验项目'
+        $currentRoot = Join-Path $TestDrive '配置校验当前'
+        $receivingRoot = Join-Path $TestDrive '配置校验接收'
+        New-Item -ItemType Directory -Path $project -Force | Out-Null
+        & $entryPath -Action adopt -ProjectPath $project | Out-Null
+        $configPath = Join-Path $TestDrive 'checkout-config.json'
+        @{
+            schemaVersion = 1
+            local = @{ currentProjectsRoot=$currentRoot; receivingRoot=$receivingRoot; pausedProjectsRoot=(Join-Path $TestDrive '暂停') }
+            portableDrive = @{
+                driveLetter='T:'; volumeLabel='T9'; requiredFileSystem='exFAT'; friendlyName='Expected Model'
+                repositoryRoot=$repository; volumeSerial=$null; deviceId=$null
+            }
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
+        $drive = [pscustomobject]@{
+            DriveLetter='T:';VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
+            IsReadOnly=$false;IsOffline=$false;FreeBytes=100GB;FriendlyName='Samsung PSSD T9';VolumeSerial='TEST';DeviceId='TEST'
+        }
+
+        $preview = & $entryPath -Action checkout -ProjectPath $project -ConfigPath $configPath -DriveInfo $drive -LocalFreeBytes 100GB | ConvertFrom-Json
+
+        $preview.result.Plan.CanExecute | Should -BeFalse
+        $preview.result.Plan.Blockers -join '；' | Should -Match '文件系统不匹配'
+        $preview.result.Plan.Blockers -join '；' | Should -Match '设备型号不匹配'
+    }
+
+    It 'repair 自动识别借出清理恢复并且不重新复制' {
+        $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'project-handoff-manager\scripts\ProjectManager.Core.psm1'
+        Import-Module $modulePath -Force
+        $driveLetter = [System.IO.Path]::GetPathRoot($TestDrive).TrimEnd('\')
+        $repository = Join-Path $TestDrive 'repair-入口仓库'
+        $project = Join-Path $repository '暂停项目\repair-入口项目'
+        $currentRoot = Join-Path $TestDrive 'repair-当前'
+        $receivingRoot = Join-Path $TestDrive 'repair-接收'
+        New-Item -ItemType Directory -Path $project -Force | Out-Null
+        Initialize-PHMProject -ProjectPath $project -InitialState 'on_t9' | Out-Null
+        Set-Content -LiteralPath (Join-Path $project 'data.txt') -Value 'portable' -Encoding utf8
+        $drive = [pscustomobject]@{
+            DriveLetter=$driveLetter;VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
+            IsReadOnly=$false;IsOffline=$false;FreeBytes=100GB;FriendlyName='Samsung PSSD T9';VolumeSerial='TEST';DeviceId='test'
+        }
+        $transfer = Invoke-PHMCheckout -PortableProjectPath $project -PortableRepositoryRoot $repository -LocalCurrentRoot $currentRoot -LocalReceivingRoot $receivingRoot -DriveInfo $drive -LocalFreeBytes 100GB -ExpectedDriveLetter $driveLetter -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmTransfer
+        $failedDelete = { param($path) throw 'disk busy' }
+        Complete-PHMCheckoutCleanup -PortableSourcePath $project -LocalTargetPath $transfer.OfficialPath -PortableRepositoryRoot $repository -DriveInfo $drive -ExpectedDriveLetter $driveLetter -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmCleanup -DeleteAction $failedDelete | Out-Null
+        $configPath = Join-Path $TestDrive 'repair-config.json'
+        @{
+            schemaVersion=1
+            local=@{currentProjectsRoot=$currentRoot;receivingRoot=$receivingRoot;pausedProjectsRoot=(Join-Path $TestDrive 'repair-暂停')}
+            portableDrive=@{driveLetter=$driveLetter;volumeLabel='T9';requiredFileSystem='NTFS';friendlyName='Samsung PSSD T9';repositoryRoot=$repository;volumeSerial='TEST';deviceId='test'}
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
+
+        $result = & $entryPath -Action repair -TargetPath $transfer.OfficialPath -ConfigPath $configPath -DriveInfo $drive | ConvertFrom-Json
+
+        $result.executed | Should -BeTrue
+        $result.repairKind | Should -Be 'checkout-cleanup'
+        Test-Path -LiteralPath $project | Should -BeFalse
+        Test-Path -LiteralPath $transfer.OfficialPath | Should -BeTrue
     }
 }
