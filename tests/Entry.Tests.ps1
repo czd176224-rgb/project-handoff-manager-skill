@@ -14,7 +14,7 @@ Describe '项目管家入口' {
     }
 
     It '未实现操作不会执行文件变更' {
-        $result = & $entryPath -Action checkin | ConvertFrom-Json
+        $result = & $entryPath -Action checkout | ConvertFrom-Json
 
         $result.executed | Should -BeFalse
         $result.message | Should -Match '尚未实现'
@@ -64,5 +64,24 @@ Describe '项目管家入口' {
         $before.state | Should -Be 'local_active'
         $executed.executed | Should -BeTrue
         $after.state | Should -Be 'local_paused'
+    }
+
+    It 'checkin 第一次只显示完整归还计划且不复制或删除' {
+        $project = Join-Path $TestDrive '归还入口项目'
+        $repository = Join-Path $TestDrive '入口项目仓库'
+        New-Item -ItemType Directory -Path $project,$repository -Force | Out-Null
+        & $entryPath -Action adopt -ProjectPath $project | Out-Null
+        $drive = [pscustomobject]@{
+            DriveLetter='T:';VolumeLabel='T9';FileSystem='NTFS';HealthStatus='Healthy';OperationalStatus='OK'
+            IsReadOnly=$false;IsOffline=$false;FreeBytes=100GB;FriendlyName='Samsung PSSD T9';VolumeSerial='TEST';DeviceId='TEST'
+        }
+
+        $preview = & $entryPath -Action checkin -ProjectPath $project -PortableRepositoryRoot $repository -DriveInfo $drive | ConvertFrom-Json
+
+        $preview.executed | Should -BeFalse
+        $preview.requiresConfirmation | Should -BeTrue
+        $preview.result.Plan.SourcePath | Should -Be (Get-Item $project).FullName
+        Test-Path -LiteralPath $preview.result.OfficialPath | Should -BeFalse
+        Test-Path -LiteralPath $project | Should -BeTrue
     }
 }

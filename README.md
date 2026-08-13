@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-项目正在按 6 个独立 PR 开发。当前开发分支已实现项目总览、自动纳管、交接同步和安全暂停；T9 归还与借出将在后续里程碑加入。
+项目正在按 6 个独立 PR 开发。当前开发分支已实现项目总览、自动纳管、交接同步、安全暂停和事务式归还 T9；从 T9 借出将在下一里程碑加入。
 
 ## 安全原则
 
@@ -29,6 +29,28 @@ pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action pause -
 ```powershell
 pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action pause -ProjectPath 'D:\项目\示例项目' -ConfirmStop
 ```
+
+## 归还到 T9
+
+第一次运行只显示完整计划，不复制：
+
+```powershell
+pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json'
+```
+
+确认磁盘身份、源路径、暂存路径、正式路径、文件数量、敏感文件和进程清单后，执行复制与校验：
+
+```powershell
+pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json' -ConfirmTransfer -ConfirmProcessStop
+```
+
+这一步不会删除本机来源。目标校验通过且没有继续修改项目后，再使用结果中的精确目标路径完成清理：
+
+```powershell
+pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -TargetPath 'T:\AI开发工作盘\项目仓库\暂停项目\示例项目' -ConfirmCleanup
+```
+
+如果本机或 T9 副本在等待清理期间发生变化，工具会阻止删除并标记冲突。
 
 ## 运行骨架
 

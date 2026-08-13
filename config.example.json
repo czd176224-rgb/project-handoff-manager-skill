@@ -9,6 +9,10 @@
     "driveLetter": "T:",
     "volumeLabel": "T9",
     "requiredFileSystem": "NTFS",
-    "repositoryRoot": "T:\\AI开发工作盘\\项目仓库"
+    "friendlyName": "Samsung PSSD T9",
+    "repositoryRoot": "T:\\AI开发工作盘\\项目仓库",
+    "deviceMarkerPath": "T:\\AI开发工作盘\\管理资料\\项目管家设备.json",
+    "volumeSerial": null,
+    "deviceId": null
   }
 }

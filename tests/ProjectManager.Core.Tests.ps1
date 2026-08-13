@@ -29,6 +29,7 @@ Describe '项目管家核心模块' {
         $menu.RequiresPreview | Should -Not -Contain $false
         ($menu | Where-Object Action -eq 'resume').Implemented | Should -BeTrue
         ($menu | Where-Object Action -eq 'pause').Implemented | Should -BeTrue
-        ($menu | Where-Object Action -in @('checkin', 'checkout')).Implemented | Should -Not -Contain $true
+        ($menu | Where-Object Action -eq 'checkin').Implemented | Should -BeTrue
+        ($menu | Where-Object Action -eq 'checkout').Implemented | Should -BeFalse
     }
 }

@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Get-PHMVersion {
     [CmdletBinding()]
@@ -18,7 +18,7 @@ function Get-PHMMenu {
     @(
         [pscustomobject]@{ Id = 1; Action = 'resume'; Name = '开始或继续当前项目'; RequiresPreview = $true; Implemented = $true }
         [pscustomobject]@{ Id = 2; Action = 'pause'; Name = '暂停当前项目'; RequiresPreview = $true; Implemented = $true }
-        [pscustomobject]@{ Id = 3; Action = 'checkin'; Name = '将当前项目归还到 T9'; RequiresPreview = $true; Implemented = $false }
+        [pscustomobject]@{ Id = 3; Action = 'checkin'; Name = '将当前项目归还到 T9'; RequiresPreview = $true; Implemented = $true }
         [pscustomobject]@{ Id = 4; Action = 'checkout'; Name = '从 T9 借出项目到本机'; RequiresPreview = $true; Implemented = $false }
     )
 }
@@ -416,13 +416,14 @@ function Update-PHMIdentity {
         [Parameter(Mandatory)][string]$ProjectPath,
         [Parameter(Mandatory)][string]$ComputerName,
         [Parameter(Mandatory)][string]$Operation,
-        [Parameter(Mandatory)][string]$State
+        [Parameter(Mandatory)][string]$State,
+        [string]$OfficialLocation
     )
 
     $identityPath = Join-Path $ProjectPath '项目交接\项目身份.json'
     $identity = Get-Content -LiteralPath $identityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     $identity.revision = [int]$identity.revision + 1
-    $identity.official_location = (Get-Item -LiteralPath $ProjectPath).FullName
+    $identity.official_location = if ($OfficialLocation) { [System.IO.Path]::GetFullPath($OfficialLocation) } else { (Get-Item -LiteralPath $ProjectPath).FullName }
     $identity.state = $State
     $identity.last_computer = $ComputerName
     $identity.last_operation = $Operation
@@ -926,4 +927,667 @@ function Suspend-PHMProject {
     }
 }
 
-Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig, Get-PHMProjectProcessPlan, Suspend-PHMProject
+function Test-PHMPortableDrive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Actual,
+        [string]$ExpectedDriveLetter,
+        [string]$ExpectedVolumeLabel,
+        [string]$ExpectedFileSystem,
+        [string]$ExpectedFriendlyName,
+        [string]$ExpectedVolumeSerial,
+        [string]$ExpectedDeviceId,
+        [long]$RequiredBytes = 0
+    )
+
+    $driveLetter = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'DriveLetter' -DefaultValue '')
+    $volumeLabel = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'VolumeLabel' -DefaultValue '')
+    $fileSystem = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'FileSystem' -DefaultValue '')
+    $friendlyName = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'FriendlyName' -DefaultValue '')
+    $health = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'HealthStatus' -DefaultValue '')
+    $operational = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'OperationalStatus' -DefaultValue '')
+    $isReadOnly = [bool](Get-PHMObjectProperty -InputObject $Actual -Name 'IsReadOnly' -DefaultValue $true)
+    $isOffline = [bool](Get-PHMObjectProperty -InputObject $Actual -Name 'IsOffline' -DefaultValue $true)
+    $freeBytes = [long](Get-PHMObjectProperty -InputObject $Actual -Name 'FreeBytes' -DefaultValue 0)
+    $actualVolumeSerial = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'VolumeSerial' -DefaultValue '')
+    $actualDeviceId = [string](Get-PHMObjectProperty -InputObject $Actual -Name 'DeviceId' -DefaultValue '')
+    $blockers = @()
+
+    if ($ExpectedDriveLetter -and $driveLetter.TrimEnd('\') -ne $ExpectedDriveLetter.TrimEnd('\')) { $blockers += "盘符不匹配：期望 $ExpectedDriveLetter。" }
+    if ($ExpectedVolumeLabel -and $volumeLabel -ne $ExpectedVolumeLabel) { $blockers += "卷标不匹配：期望 $ExpectedVolumeLabel。" }
+    if ($ExpectedFileSystem -and $fileSystem -ne $ExpectedFileSystem) { $blockers += "文件系统不匹配：期望 $ExpectedFileSystem。" }
+    if ($ExpectedFriendlyName -and $friendlyName -ne $ExpectedFriendlyName) { $blockers += "设备型号不匹配：期望 $ExpectedFriendlyName。" }
+    if ($ExpectedVolumeSerial -and $actualVolumeSerial -ne $ExpectedVolumeSerial) { $blockers += '卷序列不匹配；可能插入了错误磁盘。' }
+    if ($ExpectedDeviceId -and $actualDeviceId -ne $ExpectedDeviceId) { $blockers += '项目管家设备标识不匹配。' }
+    if ($health -and $health -ne 'Healthy') { $blockers += "磁盘健康状态异常：$health。" }
+    if ($operational -and $operational -notmatch '^(OK|Online)$') { $blockers += "磁盘运行状态异常：$operational。" }
+    if ($isReadOnly) { $blockers += '磁盘为只读状态。' }
+    if ($isOffline) { $blockers += '磁盘处于离线状态。' }
+    if ($freeBytes -lt $RequiredBytes) { $blockers += "空间不足：需要 $RequiredBytes 字节，可用 $freeBytes 字节。" }
+
+    [pscustomobject]@{
+        IsValid          = ($blockers.Count -eq 0)
+        Blockers         = @($blockers)
+        DriveLetter      = $driveLetter
+        VolumeLabel      = $volumeLabel
+        FileSystem       = $fileSystem
+        FriendlyName     = $friendlyName
+        HealthStatus     = $health
+        OperationalStatus = $operational
+        IsReadOnly       = $isReadOnly
+        IsOffline        = $isOffline
+        FreeBytes        = $freeBytes
+        RequiredBytes    = $RequiredBytes
+        IdentityChecked  = [bool]($ExpectedVolumeSerial -or $ExpectedDeviceId)
+    }
+}
+
+function Get-PHMPortableDriveInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DriveLetter,
+        [string]$DeviceMarkerPath
+    )
+
+    $letter = $DriveLetter.TrimEnd(':','\')
+    $volume = Get-Volume -DriveLetter $letter -ErrorAction Stop
+    $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+    $disk = $partition | Get-Disk -ErrorAction Stop
+    $logicalDisk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$letter`:'" -ErrorAction SilentlyContinue
+    $deviceId = $null
+    if ($DeviceMarkerPath -and (Test-Path -LiteralPath $DeviceMarkerPath -PathType Leaf)) {
+        try {
+            $marker = Get-Content -LiteralPath $DeviceMarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $deviceId = [string]$marker.device_id
+        }
+        catch { throw "项目管家设备标识文件损坏：$DeviceMarkerPath。$($_.Exception.Message)" }
+    }
+
+    [pscustomobject]@{
+        DriveLetter      = "$letter`:"
+        VolumeLabel      = [string]$volume.FileSystemLabel
+        FileSystem       = [string]$volume.FileSystem
+        HealthStatus     = [string]$volume.HealthStatus
+        OperationalStatus = [string]($volume.OperationalStatus -join ',')
+        IsReadOnly       = [bool]$disk.IsReadOnly
+        IsOffline        = [bool]$disk.IsOffline
+        FreeBytes        = [long]$volume.SizeRemaining
+        FriendlyName     = [string]$disk.FriendlyName
+        VolumeSerial     = [string]$logicalDisk.VolumeSerialNumber
+        DeviceId         = $deviceId
+    }
+}
+
+function Register-PHMPortableDevice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$DriveInfo,
+        [Parameter(Mandatory)][string]$DeviceMarkerPath,
+        [Parameter(Mandatory)][string]$LocalTrustPath,
+        [switch]$ConfirmRegistration,
+        [string]$ExpectedDriveLetter = 'T:',
+        [string]$ExpectedVolumeLabel = 'T9',
+        [string]$ExpectedFileSystem = 'NTFS',
+        [string]$ExpectedFriendlyName = 'Samsung PSSD T9'
+    )
+
+    $validation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName
+    if (-not $validation.IsValid) {
+        return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$false; DeviceMarkerPath=$DeviceMarkerPath; LocalTrustPath=$LocalTrustPath; Blockers=@($validation.Blockers) }
+    }
+    if (-not $ConfirmRegistration) {
+        return [pscustomobject]@{
+            Executed=$false; RequiresConfirmation=$true; DeviceMarkerPath=$DeviceMarkerPath; LocalTrustPath=$LocalTrustPath; Blockers=@()
+            ExpectedResult='移动盘写入随机设备标识；本机信任文件保存该标识和卷序列。两者均不进入公开仓库。'
+        }
+    }
+
+    $deviceId = [guid]::NewGuid().ToString()
+    if (Test-Path -LiteralPath $DeviceMarkerPath -PathType Leaf) {
+        $existingMarker = Get-Content -LiteralPath $DeviceMarkerPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        if ($existingMarker.device_id) { $deviceId = [string]$existingMarker.device_id }
+    }
+    if (Test-Path -LiteralPath $LocalTrustPath -PathType Leaf) {
+        $existingTrust = Get-Content -LiteralPath $LocalTrustPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        $actualSerial = [string](Get-PHMObjectProperty -InputObject $DriveInfo -Name 'VolumeSerial' -DefaultValue '')
+        if ($existingTrust.device_id -ne $deviceId -or $existingTrust.volume_serial -ne $actualSerial) {
+            return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$false; DeviceMarkerPath=$DeviceMarkerPath; LocalTrustPath=$LocalTrustPath; Blockers=@('现有设备标识或卷序列与当前磁盘不一致。') }
+        }
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path $DeviceMarkerPath -Parent),(Split-Path $LocalTrustPath -Parent) -Force | Out-Null
+    $marker = [ordered]@{
+        schema_version = 1
+        device_id      = $deviceId
+        volume_label   = [string](Get-PHMObjectProperty -InputObject $DriveInfo -Name 'VolumeLabel' -DefaultValue '')
+        created_at     = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    $trust = [ordered]@{
+        schema_version = 1
+        device_id      = $deviceId
+        volume_serial  = [string](Get-PHMObjectProperty -InputObject $DriveInfo -Name 'VolumeSerial' -DefaultValue '')
+        drive_letter   = [string](Get-PHMObjectProperty -InputObject $DriveInfo -Name 'DriveLetter' -DefaultValue '')
+        friendly_name  = [string](Get-PHMObjectProperty -InputObject $DriveInfo -Name 'FriendlyName' -DefaultValue '')
+        registered_at  = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Write-PHMUtf8File -Path $DeviceMarkerPath -Content ($marker | ConvertTo-Json -Depth 5)
+    Write-PHMUtf8File -Path $LocalTrustPath -Content ($trust | ConvertTo-Json -Depth 5)
+    [pscustomobject]@{ Executed=$true; RequiresConfirmation=$false; DeviceMarkerPath=$DeviceMarkerPath; LocalTrustPath=$LocalTrustPath; Blockers=@() }
+}
+
+function Get-PHMStringHash {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+
+function Get-PHMProjectInventory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ProjectPath)
+
+    if (-not (Test-Path -LiteralPath $ProjectPath -PathType Container)) {
+        throw "项目文件夹不存在：$ProjectPath"
+    }
+    $root = (Get-Item -LiteralPath $ProjectPath).FullName
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($root)
+    $files = @()
+    $directories = @()
+    $reparsePoints = @()
+    $unreadable = @()
+
+    while ($stack.Count -gt 0) {
+        $directoryPath = $stack.Pop()
+        try {
+            $children = @(Get-ChildItem -LiteralPath $directoryPath -Force -ErrorAction Stop)
+        }
+        catch {
+            $unreadable += [pscustomobject]@{ RelativePath = Get-PHMRelativePath -BasePath $root -Path $directoryPath; Error = $_.Exception.Message }
+            continue
+        }
+
+        foreach ($child in $children) {
+            $relativePath = Get-PHMRelativePath -BasePath $root -Path $child.FullName
+            $isReparsePoint = [bool]($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            if ($isReparsePoint) {
+                $reparsePoints += [pscustomobject]@{
+                    RelativePath = $relativePath
+                    Type         = if ($child.PSIsContainer) { 'Directory' } else { 'File' }
+                    LinkType     = [string](Get-PHMObjectProperty -InputObject $child -Name 'LinkType' -DefaultValue 'ReparsePoint')
+                }
+                continue
+            }
+            if ($child.PSIsContainer) {
+                $directories += [pscustomobject]@{ RelativePath = $relativePath; LastModified = $child.LastWriteTimeUtc.ToString('o') }
+                $stack.Push($child.FullName)
+                continue
+            }
+
+            $isCritical = $relativePath -in @(
+                '项目交接\项目身份.json',
+                '项目交接\项目交接报告.md',
+                '项目交接\环境清单.json'
+            )
+            $isBulky = $relativePath -match '^(?i:node_modules|\.venv|项目缓存|离线依赖|\.git\\objects)\\'
+            $files += [pscustomobject]@{
+                RelativePath = $relativePath
+                FullPath     = $child.FullName
+                Size         = [long]$child.Length
+                LastModified = $child.LastWriteTimeUtc.ToString('o')
+                IsCritical   = $isCritical
+                IsBulky      = $isBulky
+                Hash         = $null
+                HashPolicy   = if ($isCritical) { 'critical' } elseif ($isBulky) { 'sample-candidate' } else { 'full' }
+            }
+        }
+    }
+
+    $files = @($files | Sort-Object RelativePath)
+    $bulkyFiles = @($files | Where-Object IsBulky)
+    $samplePaths = @{}
+    for ($index = 0; $index -lt $bulkyFiles.Count; $index++) {
+        if ($index -lt 10 -or $index -ge [math]::Max(0, $bulkyFiles.Count - 10) -or $index % 100 -eq 0) {
+            $samplePaths[$bulkyFiles[$index].RelativePath] = $true
+        }
+    }
+
+    foreach ($file in $files) {
+        $shouldHash = $file.IsCritical -or -not $file.IsBulky -or $samplePaths.ContainsKey($file.RelativePath)
+        if (-not $shouldHash) {
+            $file.HashPolicy = 'manifest-only'
+            continue
+        }
+        try {
+            $file.Hash = (Get-FileHash -LiteralPath $file.FullPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($file.IsBulky -and -not $file.IsCritical) { $file.HashPolicy = 'sample' }
+        }
+        catch {
+            $unreadable += [pscustomobject]@{ RelativePath = $file.RelativePath; Error = $_.Exception.Message }
+        }
+    }
+
+    [long]$totalBytes = 0
+    foreach ($file in $files) { $totalBytes += $file.Size }
+    $manifestLines = @($files | ForEach-Object { "$($_.RelativePath)|$($_.Size)|$($_.LastModified)|$($_.Hash)" })
+    $manifestDigest = Get-PHMStringHash -Text ($manifestLines -join "`n")
+
+    [pscustomobject]@{
+        RootPath       = $root
+        FileCount      = $files.Count
+        DirectoryCount = $directories.Count
+        TotalBytes     = $totalBytes
+        Files          = @($files)
+        Directories    = @($directories | Sort-Object RelativePath)
+        CriticalFiles  = @($files | Where-Object IsCritical)
+        ReparsePoints  = @($reparsePoints)
+        Unreadable     = @($unreadable)
+        ManifestDigest = $manifestDigest
+    }
+}
+
+function Get-PHMSensitiveFiles {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Inventory)
+
+    @($Inventory.Files | Where-Object {
+        $name = Split-Path $_.RelativePath -Leaf
+        $name -match '^(?i:\.env(?:\..+)?|id_rsa|id_ed25519|credentials.*\.json)$' -or
+        $name -match '(?i:\.(pem|key|pfx|p12))$'
+    } | ForEach-Object RelativePath)
+}
+
+function New-PHMCheckinPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][string]$PortableRepositoryRoot,
+        [Parameter(Mandatory)]$DriveInfo,
+        [object[]]$ProcessRecords,
+        [switch]$AllowSensitiveFiles,
+        [string]$ExpectedDriveLetter = 'T:',
+        [string]$ExpectedVolumeLabel = 'T9',
+        [string]$ExpectedFileSystem = 'NTFS',
+        [string]$ExpectedFriendlyName = 'Samsung PSSD T9',
+        [string]$ExpectedVolumeSerial,
+        [string]$ExpectedDeviceId
+    )
+
+    if (-not (Test-Path -LiteralPath $ProjectPath -PathType Container)) {
+        throw "项目文件夹不存在：$ProjectPath"
+    }
+    $sourcePath = (Get-Item -LiteralPath $ProjectPath).FullName
+    $projectName = Split-Path $sourcePath -Leaf
+    $identitySummary = Get-PHMIdentitySummary -ProjectPath $sourcePath
+    $projectId = $identitySummary.ProjectId
+    if (-not $projectId) {
+        $projectId = [guid]::NewGuid().ToString()
+    }
+
+    $inventory = Get-PHMProjectInventory -ProjectPath $sourcePath
+    $requiredBytes = [long]($inventory.TotalBytes + [math]::Max(100MB, [math]::Ceiling($inventory.TotalBytes * 0.1)))
+    $driveValidation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName -ExpectedVolumeSerial $ExpectedVolumeSerial -ExpectedDeviceId $ExpectedDeviceId -RequiredBytes $requiredBytes
+    $receivingPath = Join-Path $PortableRepositoryRoot "正在接收\$projectId\$projectName"
+    $officialPath = Join-Path $PortableRepositoryRoot "暂停项目\$projectName"
+    $blockers = @($driveValidation.Blockers)
+    if ($inventory.ReparsePoints.Count -gt 0) { $blockers += "发现 $($inventory.ReparsePoints.Count) 个重解析点；为防止复制项目外内容，归还已阻断。" }
+    if ($inventory.Unreadable.Count -gt 0) { $blockers += "发现 $($inventory.Unreadable.Count) 个无法读取的文件或目录。" }
+    if (Test-Path -LiteralPath $receivingPath) { $blockers += "临时接收目录已存在：$receivingPath。请先修复未完成转移。" }
+    if (Test-Path -LiteralPath $officialPath) { $blockers += "正式目录已存在：$officialPath。禁止自动覆盖。" }
+
+    $sensitiveFiles = @(Get-PHMSensitiveFiles -Inventory $inventory)
+    $requiresSensitiveConfirmation = ($sensitiveFiles.Count -gt 0 -and -not $AllowSensitiveFiles)
+    if ($requiresSensitiveConfirmation) { $blockers += "发现 $($sensitiveFiles.Count) 个可能包含凭据的敏感文件；需要明确确认随完整项目迁移。" }
+
+    $pauseParameters = @{ ProjectPath = $sourcePath }
+    if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $pauseParameters.ProcessRecords = @($ProcessRecords) }
+    $pausePlan = Get-PHMProjectProcessPlan @pauseParameters
+    $requiresPauseConfirmation = $pausePlan.StopCandidates.Count -gt 0
+    if ($requiresPauseConfirmation) { $blockers += "发现 $($pausePlan.StopCandidates.Count) 个明确属于项目的运行进程；必须先确认暂停。" }
+
+    [pscustomobject]@{
+        CanExecute                    = ($blockers.Count -eq 0)
+        SourcePath                    = $sourcePath
+        ProjectName                   = $projectName
+        ProjectId                     = $projectId
+        NeedsAdoption                 = (-not $identitySummary.Managed)
+        PortableRepositoryRoot        = $PortableRepositoryRoot
+        ReceivingPath                 = $receivingPath
+        OfficialPath                  = $officialPath
+        Inventory                     = $inventory
+        RequiredBytes                 = $requiredBytes
+        DriveValidation               = $driveValidation
+        PausePlan                     = $pausePlan
+        RequiresPauseConfirmation     = $requiresPauseConfirmation
+        SensitiveFiles                = @($sensitiveFiles)
+        RequiresSensitiveConfirmation = $requiresSensitiveConfirmation
+        ReparsePoints                 = @($inventory.ReparsePoints)
+        ExcludedFiles                 = @()
+        Blockers                      = @($blockers)
+        ExpectedResult                = '确认后将暂停项目、更新交接、复制到空暂存目录、校验并提交为 T9 正式副本；本机来源不会在本阶段删除。'
+    }
+}
+
+function Copy-PHMProjectDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    $parent = Split-Path $Destination -Parent
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $output = & robocopy $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ /SL /NP /NFL /NDL /NJH /NJS 2>&1
+    $exitCode = $LASTEXITCODE
+    [pscustomobject]@{
+        Success  = ($exitCode -le 7)
+        ExitCode = $exitCode
+        Message  = ($output -join [Environment]::NewLine)
+    }
+}
+
+function Compare-PHMProjectInventories {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$SourceInventory,
+        [Parameter(Mandatory)]$DestinationInventory
+    )
+
+    $differences = @()
+    $destinationByPath = @{}
+    foreach ($file in @($DestinationInventory.Files)) { $destinationByPath[$file.RelativePath.ToLowerInvariant()] = $file }
+    foreach ($sourceFile in @($SourceInventory.Files)) {
+        $key = $sourceFile.RelativePath.ToLowerInvariant()
+        if (-not $destinationByPath.ContainsKey($key)) {
+            $differences += "目标缺少文件：$($sourceFile.RelativePath)"
+            continue
+        }
+        $destinationFile = $destinationByPath[$key]
+        if ([long]$sourceFile.Size -ne [long]$destinationFile.Size) {
+            $differences += "文件大小不一致：$($sourceFile.RelativePath)"
+        }
+        if ($sourceFile.Hash -and $destinationFile.Hash -and $sourceFile.Hash -ne $destinationFile.Hash) {
+            $differences += "文件哈希不一致：$($sourceFile.RelativePath)"
+        }
+    }
+    $sourcePaths = @($SourceInventory.Files | ForEach-Object { $_.RelativePath.ToLowerInvariant() })
+    foreach ($destinationFile in @($DestinationInventory.Files)) {
+        if ($sourcePaths -notcontains $destinationFile.RelativePath.ToLowerInvariant()) {
+            $differences += "目标多出文件：$($destinationFile.RelativePath)"
+        }
+    }
+    if ($SourceInventory.FileCount -ne $DestinationInventory.FileCount) { $differences += '文件总数不一致。' }
+    if ($SourceInventory.TotalBytes -ne $DestinationInventory.TotalBytes) { $differences += '总字节数不一致。' }
+
+    foreach ($criticalPath in @('项目交接\项目身份.json', '项目交接\项目交接报告.md', '项目交接\环境清单.json')) {
+        $target = @($DestinationInventory.Files | Where-Object RelativePath -eq $criticalPath)
+        if ($target.Count -eq 0) { $differences += "缺少关键管理文件：$criticalPath"; continue }
+        try {
+            if ($criticalPath.EndsWith('.json')) {
+                Get-Content -LiteralPath $target[0].FullPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Out-Null
+            }
+            elseif ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $target[0].FullPath -Raw -ErrorAction Stop))) {
+                throw '文件为空'
+            }
+        }
+        catch { $differences += "关键管理文件不可解析：$criticalPath" }
+    }
+
+    [pscustomobject]@{
+        IsMatch     = ($differences.Count -eq 0)
+        Differences = @($differences)
+        SourceFiles = $SourceInventory.FileCount
+        TargetFiles = $DestinationInventory.FileCount
+        SourceBytes = $SourceInventory.TotalBytes
+        TargetBytes = $DestinationInventory.TotalBytes
+    }
+}
+
+function Get-PHMCleanupDigest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ProjectPath)
+
+    $inventory = Get-PHMProjectInventory -ProjectPath $ProjectPath
+    $lines = @($inventory.Files | Where-Object RelativePath -ne '项目交接\转移凭证.json' | ForEach-Object {
+        "$($_.RelativePath)|$($_.Size)|$($_.LastModified)|$($_.Hash)"
+    })
+    Get-PHMStringHash -Text ($lines -join "`n")
+}
+
+function Write-PHMRegistry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RegistryPath,
+        [Parameter(Mandatory)]$Record
+    )
+
+    $directory = Split-Path $RegistryPath -Parent
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    if (Test-Path -LiteralPath $RegistryPath -PathType Leaf) {
+        $registry = Get-Content -LiteralPath $RegistryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    else {
+        $registry = [pscustomobject]@{ schemaVersion = 1; updatedAt = $null; projects = @() }
+    }
+    $projects = @($registry.projects | Where-Object projectId -ne $Record.projectId)
+    $projects += $Record
+    $updated = [ordered]@{
+        schemaVersion = 1
+        updatedAt     = (Get-Date).ToUniversalTime().ToString('o')
+        projects      = @($projects | Sort-Object projectName)
+    }
+    $tempPath = "$RegistryPath.tmp-$([guid]::NewGuid().ToString('N'))"
+    $backupPath = "$RegistryPath.bak"
+    Write-PHMUtf8File -Path $tempPath -Content ($updated | ConvertTo-Json -Depth 10)
+    Get-Content -LiteralPath $tempPath -Raw | ConvertFrom-Json -ErrorAction Stop | Out-Null
+    if (Test-Path -LiteralPath $RegistryPath) {
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force }
+        [System.IO.File]::Replace($tempPath, $RegistryPath, $backupPath, $true)
+    }
+    else { [System.IO.File]::Move($tempPath, $RegistryPath) }
+    return $RegistryPath
+}
+
+function Get-PHMRegistryPathFromRepository {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PortableRepositoryRoot)
+    Join-Path (Split-Path $PortableRepositoryRoot -Parent) '管理资料\项目登记.json'
+}
+
+function New-PHMEmptyChanges {
+    [pscustomobject]@{ NewMaterials = @(); NewOutputs = @(); Unclassified = @() }
+}
+
+function Invoke-PHMCheckin {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][string]$PortableRepositoryRoot,
+        [Parameter(Mandatory)]$DriveInfo,
+        [object[]]$ProcessRecords,
+        [switch]$ConfirmTransfer,
+        [switch]$ConfirmProcessStop,
+        [switch]$AllowSensitiveFiles,
+        [scriptblock]$ProcessStopper,
+        [scriptblock]$CopyAction,
+        [scriptblock]$RegistryWriter,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [string]$ExpectedVolumeSerial,
+        [string]$ExpectedDeviceId
+    )
+
+    $planParameters = @{
+        ProjectPath=$ProjectPath; PortableRepositoryRoot=$PortableRepositoryRoot; DriveInfo=$DriveInfo
+        AllowSensitiveFiles=$AllowSensitiveFiles; ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
+    }
+    if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $planParameters.ProcessRecords = @($ProcessRecords) }
+    $plan = New-PHMCheckinPlan @planParameters
+    if (-not $ConfirmTransfer) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; RequiresConfirmation=$true; Plan=$plan; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+    if ($plan.RequiresSensitiveConfirmation -and -not $AllowSensitiveFiles) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='sensitive-confirmation'; Plan=$plan; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+    if ($plan.RequiresPauseConfirmation -and -not $ConfirmProcessStop) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='pause-confirmation'; Plan=$plan; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    $pauseParameters = @{ ProjectPath=$ProjectPath; ComputerName=$ComputerName; ConfirmStop=$true }
+    if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $pauseParameters.ProcessRecords = @($ProcessRecords) }
+    if ($ProcessStopper) { $pauseParameters.ProcessStopper = $ProcessStopper }
+    $pauseResult = Suspend-PHMProject @pauseParameters
+    if ($pauseResult.RemainingCandidates.Count -gt 0) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='pause'; Plan=$plan; PauseResult=$pauseResult; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    $executionPlanParameters = @{
+        ProjectPath=$ProjectPath; PortableRepositoryRoot=$PortableRepositoryRoot; DriveInfo=$DriveInfo
+        AllowSensitiveFiles=$AllowSensitiveFiles; ExpectedVolumeSerial=$ExpectedVolumeSerial; ExpectedDeviceId=$ExpectedDeviceId
+    }
+    if ($PSBoundParameters.ContainsKey('ProcessRecords')) { $executionPlanParameters.ProcessRecords = @() }
+    $plan = New-PHMCheckinPlan @executionPlanParameters
+    if (-not $plan.CanExecute) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='preflight'; Plan=$plan; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    $sourceBefore = Get-PHMProjectInventory -ProjectPath $plan.SourcePath
+    if (-not $CopyAction) { $CopyAction = { param($source,$destination) Copy-PHMProjectDirectory -Source $source -Destination $destination } }
+    try { $copyResult = & $CopyAction $plan.SourcePath $plan.ReceivingPath }
+    catch { $copyResult = [pscustomobject]@{ Success=$false; ExitCode=-1; Message=$_.Exception.Message } }
+    if (-not $copyResult -or -not [bool]$copyResult.Success) {
+        Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin-copy-failed' -State 'transfer_incomplete' | Out-Null
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='copy'; CopyResult=$copyResult; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    $sourceAfter = Get-PHMProjectInventory -ProjectPath $plan.SourcePath
+    if ($sourceBefore.ManifestDigest -ne $sourceAfter.ManifestDigest) {
+        Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin-source-changed' -State 'transfer_incomplete' | Out-Null
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='source-changed'; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+    $targetInventory = Get-PHMProjectInventory -ProjectPath $plan.ReceivingPath
+    $verification = Compare-PHMProjectInventories -SourceInventory $sourceAfter -DestinationInventory $targetInventory
+    if (-not $verification.IsMatch) {
+        Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin-verification-failed' -State 'transfer_incomplete' | Out-Null
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='verification'; Verification=$verification; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path $plan.OfficialPath -Parent) -Force | Out-Null
+    Move-Item -LiteralPath $plan.ReceivingPath -Destination $plan.OfficialPath -ErrorAction Stop
+    Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin' -State 'cleanup_pending' -OfficialLocation $plan.OfficialPath | Out-Null
+    Add-PHMHandoffRecord -ProjectPath $plan.SourcePath -ComputerName $ComputerName -ActionLabel '归还到 T9（等待清理本机来源）' -Changes (New-PHMEmptyChanges) -ValidationResult '目标项目已完成完整性校验。' | Out-Null
+    $cleanupDigest = Get-PHMCleanupDigest -ProjectPath $plan.SourcePath
+    $receipt = [ordered]@{
+        schema_version         = 1
+        operation              = 'checkin'
+        project_id             = $plan.ProjectId
+        source_path            = $plan.SourcePath
+        target_path            = $plan.OfficialPath
+        transferred_at         = (Get-Date).ToUniversalTime().ToString('o')
+        source_manifest_digest = $cleanupDigest
+    }
+    $sourceReceiptPath = Join-Path $plan.SourcePath '项目交接\转移凭证.json'
+    Write-PHMUtf8File -Path $sourceReceiptPath -Content ($receipt | ConvertTo-Json -Depth 5)
+    foreach ($name in @('项目身份.json','项目交接报告.md','环境清单.json','转移凭证.json')) {
+        [System.IO.File]::Copy((Join-Path $plan.SourcePath "项目交接\$name"), (Join-Path $plan.OfficialPath "项目交接\$name"), $true)
+    }
+    $finalSourceDigest = Get-PHMCleanupDigest -ProjectPath $plan.SourcePath
+    $finalTargetDigest = Get-PHMCleanupDigest -ProjectPath $plan.OfficialPath
+    if ($finalSourceDigest -ne $cleanupDigest -or $finalTargetDigest -ne $cleanupDigest) {
+        return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='finalization'; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
+    }
+
+    $registryPath = Get-PHMRegistryPathFromRepository -PortableRepositoryRoot $PortableRepositoryRoot
+    $record = [pscustomobject]@{ projectId=$plan.ProjectId; projectName=$plan.ProjectName; state='cleanup_pending'; location=$plan.OfficialPath; updatedAt=(Get-Date).ToUniversalTime().ToString('o') }
+    if (-not $RegistryWriter) { $RegistryWriter = { param($path,$item) Write-PHMRegistry -RegistryPath $path -Record $item } }
+    try { & $RegistryWriter $registryPath $record | Out-Null }
+    catch {
+        return [pscustomobject]@{ Executed=$false; Verified=$true; FailureStage='registry'; Error=$_.Exception.Message; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0; CleanupRequired=$true }
+    }
+
+    [pscustomobject]@{
+        Executed=$true; Verified=$true; FailureStage=$null; ProjectId=$plan.ProjectId
+        SourcePath=$plan.SourcePath; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath
+        Verification=$verification; CopyResult=$copyResult; RegistryPath=$registryPath
+        CleanupRequired=$true; SourceStillExists=$true; DeletedFiles=0
+        CleanupPrompt="目标项目已经完整校验。准备清理本机来源：$($plan.SourcePath)"
+    }
+}
+
+function Test-PHMDeletionPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string[]]$ProtectedRoots = @()
+    )
+
+    try { $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return $false }
+    $root = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\')
+    if ($fullPath -eq $root) { return $false }
+    $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+    if ($fullPath.Equals($userProfile, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    foreach ($protected in @($ProtectedRoots)) {
+        if (-not $protected) { continue }
+        $protectedFull = [System.IO.Path]::GetFullPath($protected).TrimEnd('\')
+        if ($fullPath.Equals($protectedFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    return $true
+}
+
+function Complete-PHMCheckinCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$TargetPath,
+        [switch]$ConfirmCleanup,
+        [string[]]$ProtectedRoots = @()
+    )
+
+    $sourceFull = if (Test-Path -LiteralPath $SourcePath) { (Get-Item -LiteralPath $SourcePath).FullName } else { [System.IO.Path]::GetFullPath($SourcePath) }
+    $targetFull = if (Test-Path -LiteralPath $TargetPath) { (Get-Item -LiteralPath $TargetPath).FullName } else { [System.IO.Path]::GetFullPath($TargetPath) }
+    if (-not $ConfirmCleanup) {
+        return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$true; SourcePath=$sourceFull; TargetPath=$targetFull; ExpectedResult='删除本机来源后，T9 成为唯一正式完整副本。' }
+    }
+    if (-not (Test-PHMDeletionPath -Path $sourceFull -ProtectedRoots $ProtectedRoots)) {
+        return [pscustomobject]@{ Executed=$false; RequiresConfirmation=$false; SourcePath=$sourceFull; TargetPath=$targetFull; BlockedReason='来源路径受删除保护。' }
+    }
+    if (-not (Test-Path -LiteralPath $sourceFull -PathType Container) -or -not (Test-Path -LiteralPath $targetFull -PathType Container)) {
+        return [pscustomobject]@{ Executed=$false; BlockedReason='来源或目标项目不存在。'; SourcePath=$sourceFull; TargetPath=$targetFull }
+    }
+    $receiptPath = Join-Path $targetFull '项目交接\转移凭证.json'
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        return [pscustomobject]@{ Executed=$false; BlockedReason='目标缺少转移凭证。'; SourcePath=$sourceFull; TargetPath=$targetFull }
+    }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    if (-not $sourceFull.Equals([System.IO.Path]::GetFullPath([string]$receipt.source_path), [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $targetFull.Equals([System.IO.Path]::GetFullPath([string]$receipt.target_path), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Executed=$false; BlockedReason='转移凭证路径与当前路径不一致。'; SourcePath=$sourceFull; TargetPath=$targetFull }
+    }
+    $sourceIdentity = Get-Content -LiteralPath (Join-Path $sourceFull '项目交接\项目身份.json') -Raw | ConvertFrom-Json
+    $targetIdentity = Get-Content -LiteralPath (Join-Path $targetFull '项目交接\项目身份.json') -Raw | ConvertFrom-Json
+    if ($sourceIdentity.project_id -ne $receipt.project_id -or $targetIdentity.project_id -ne $receipt.project_id) {
+        return [pscustomobject]@{ Executed=$false; BlockedReason='项目编号不一致。'; SourcePath=$sourceFull; TargetPath=$targetFull }
+    }
+    $sourceDigest = Get-PHMCleanupDigest -ProjectPath $sourceFull
+    $targetDigest = Get-PHMCleanupDigest -ProjectPath $targetFull
+    if ($sourceDigest -ne $receipt.source_manifest_digest -or $targetDigest -ne $receipt.source_manifest_digest) {
+        Update-PHMIdentity -ProjectPath $sourceFull -ComputerName $env:COMPUTERNAME -Operation 'cleanup-blocked' -State 'conflict' -OfficialLocation $targetFull | Out-Null
+        Update-PHMIdentity -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -Operation 'cleanup-blocked' -State 'conflict' -OfficialLocation $targetFull | Out-Null
+        return [pscustomobject]@{ Executed=$false; BlockedReason='来源或目标在复制后发生变化，已禁止自动清理并标记冲突。'; SourcePath=$sourceFull; TargetPath=$targetFull }
+    }
+
+    Remove-Item -LiteralPath $sourceFull -Recurse -Force -ErrorAction Stop
+    $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -Operation 'checkin-cleanup' -State 'on_t9' -OfficialLocation $targetFull
+    Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -ActionLabel '完成归还并清理本机来源' -Changes (New-PHMEmptyChanges) -ValidationResult 'T9 为唯一正式完整副本。' | Out-Null
+    $repositoryRoot = Split-Path (Split-Path $targetFull -Parent) -Parent
+    $registryPath = Get-PHMRegistryPathFromRepository -PortableRepositoryRoot $repositoryRoot
+    $record = [pscustomobject]@{ projectId=[string]$identity.project_id; projectName=[string]$identity.project_name; state='on_t9'; location=$targetFull; updatedAt=(Get-Date).ToUniversalTime().ToString('o') }
+    Write-PHMRegistry -RegistryPath $registryPath -Record $record | Out-Null
+    [pscustomobject]@{ Executed=$true; DeletedSource=$true; SourcePath=$sourceFull; TargetPath=$targetFull; State='on_t9'; RegistryPath=$registryPath }
+}
+
+Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig, Get-PHMProjectProcessPlan, Suspend-PHMProject, Test-PHMPortableDrive, Get-PHMPortableDriveInfo, Register-PHMPortableDevice, Get-PHMProjectInventory, New-PHMCheckinPlan, Invoke-PHMCheckin, Test-PHMDeletionPath, Complete-PHMCheckinCleanup
