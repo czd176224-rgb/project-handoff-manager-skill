@@ -17,7 +17,7 @@ function Get-PHMMenu {
 
     @(
         [pscustomobject]@{ Id = 1; Action = 'resume'; Name = '开始或继续当前项目'; RequiresPreview = $true; Implemented = $true }
-        [pscustomobject]@{ Id = 2; Action = 'pause'; Name = '暂停当前项目'; RequiresPreview = $true; Implemented = $false }
+        [pscustomobject]@{ Id = 2; Action = 'pause'; Name = '暂停当前项目'; RequiresPreview = $true; Implemented = $true }
         [pscustomobject]@{ Id = 3; Action = 'checkin'; Name = '将当前项目归还到 T9'; RequiresPreview = $true; Implemented = $false }
         [pscustomobject]@{ Id = 4; Action = 'checkout'; Name = '从 T9 借出项目到本机'; RequiresPreview = $true; Implemented = $false }
     )
@@ -637,4 +637,293 @@ function Read-PHMConfig {
     }
 }
 
-Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig
+function Get-PHMObjectProperty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$InputObject,
+        [Parameter(Mandatory)][string]$Name,
+        $DefaultValue = $null
+    )
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($property) { return $property.Value }
+    return $DefaultValue
+}
+
+function Test-PHMTextContainsProjectPath {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory)][string]$ProjectPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $normalizedText = $Text.Replace('/', '\')
+    $normalizedPath = $ProjectPath.Replace('/', '\').TrimEnd('\')
+    $pattern = '(?i)(^|[\s"''=])' + [regex]::Escape($normalizedPath) + '(?=\\|[\s"'']|$)'
+    return [regex]::IsMatch($normalizedText, $pattern)
+}
+
+function Test-PHMTextContainsProjectName {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory)][string]$ProjectName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $pattern = '(?i)(^|[\\/\s"''])' + [regex]::Escape($ProjectName) + '(?=[\\/\s"'']|$)'
+    return [regex]::IsMatch($Text, $pattern)
+}
+
+function Get-PHMSystemProcessRecords {
+    [CmdletBinding()]
+    param()
+
+    $records = @()
+    foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+        $runtime = Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+        $records += [pscustomobject]@{
+            Id              = [int]$process.ProcessId
+            Name            = [System.IO.Path]::GetFileNameWithoutExtension([string]$process.Name)
+            CommandLine     = [string]$process.CommandLine
+            ExecutablePath  = [string]$process.ExecutablePath
+            ParentProcessId = [int]$process.ParentProcessId
+            WorkingSetSize  = if ($runtime) { [long]$runtime.WorkingSet64 } else { [long]$process.WorkingSetSize }
+            CpuSeconds      = if ($runtime -and $runtime.CPU) { [double]$runtime.CPU } else { 0.0 }
+        }
+    }
+    return @($records)
+}
+
+function ConvertTo-PHMProcessSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Record,
+        [string]$Evidence,
+        [string]$Reason
+    )
+
+    $workingSet = [long](Get-PHMObjectProperty -InputObject $Record -Name 'WorkingSetSize' -DefaultValue 0)
+    [pscustomobject]@{
+        Id              = [int](Get-PHMObjectProperty -InputObject $Record -Name 'Id' -DefaultValue 0)
+        Name            = [string](Get-PHMObjectProperty -InputObject $Record -Name 'Name' -DefaultValue '')
+        ParentProcessId = [int](Get-PHMObjectProperty -InputObject $Record -Name 'ParentProcessId' -DefaultValue 0)
+        CommandLine     = [string](Get-PHMObjectProperty -InputObject $Record -Name 'CommandLine' -DefaultValue '')
+        MemoryMB        = [math]::Round($workingSet / 1MB, 2)
+        CpuSeconds      = [double](Get-PHMObjectProperty -InputObject $Record -Name 'CpuSeconds' -DefaultValue 0)
+        Evidence        = $Evidence
+        Reason          = $Reason
+    }
+}
+
+function Get-PHMProjectProcessPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [object[]]$ProcessRecords
+    )
+
+    $normalizedProjectPath = $ProjectPath.Replace('/', '\').TrimEnd('\')
+    $projectName = Split-Path $normalizedProjectPath -Leaf
+    $records = if ($PSBoundParameters.ContainsKey('ProcessRecords')) { @($ProcessRecords) } else { @(Get-PHMSystemProcessRecords) }
+    $protectedPattern = '^(?i:OpenAI\.Codex|Codex|ChatGPT|System|Idle|Registry|smss|csrss|wininit|services|lsass|winlogon|dwm|explorer)$'
+    $candidates = @()
+    $skipped = @()
+    $uncertain = @()
+    $candidateIds = @{}
+
+    foreach ($record in $records) {
+        $recordId = [int](Get-PHMObjectProperty -InputObject $record -Name 'Id' -DefaultValue 0)
+        $name = [string](Get-PHMObjectProperty -InputObject $record -Name 'Name' -DefaultValue '')
+        $commandLine = [string](Get-PHMObjectProperty -InputObject $record -Name 'CommandLine' -DefaultValue '')
+        $executablePath = [string](Get-PHMObjectProperty -InputObject $record -Name 'ExecutablePath' -DefaultValue '')
+        $exactCommandMatch = Test-PHMTextContainsProjectPath -Text $commandLine -ProjectPath $normalizedProjectPath
+        $exactExecutableMatch = Test-PHMTextContainsProjectPath -Text $executablePath -ProjectPath $normalizedProjectPath
+        $isProtected = $name -match $protectedPattern
+
+        if ($recordId -eq $PID -and ($exactCommandMatch -or $exactExecutableMatch)) {
+            $skipped += ConvertTo-PHMProcessSummary -Record $record -Reason '保护进程：项目管家当前运行进程不能停止自身。'
+            continue
+        }
+
+        if (($exactCommandMatch -or $exactExecutableMatch) -and $isProtected) {
+            $skipped += ConvertTo-PHMProcessSummary -Record $record -Reason '保护进程：即使命中项目路径也默认跳过。'
+            continue
+        }
+        if ($exactCommandMatch -or $exactExecutableMatch) {
+            $evidence = if ($exactCommandMatch) { '命令行包含完整项目路径' } else { '可执行文件位于完整项目路径内' }
+            $summary = ConvertTo-PHMProcessSummary -Record $record -Evidence $evidence
+            $candidates += $summary
+            $candidateIds[[int]$summary.Id] = $true
+            continue
+        }
+        if (Test-PHMTextContainsProjectName -Text $commandLine -ProjectName $projectName) {
+            $uncertain += ConvertTo-PHMProcessSummary -Record $record -Reason '只有项目名称，没有完整项目路径，无法证明归属。'
+        }
+    }
+
+    $addedChild = $true
+    while ($addedChild) {
+        $addedChild = $false
+        foreach ($record in $records) {
+            $id = [int](Get-PHMObjectProperty -InputObject $record -Name 'Id' -DefaultValue 0)
+            $parentId = [int](Get-PHMObjectProperty -InputObject $record -Name 'ParentProcessId' -DefaultValue 0)
+            $name = [string](Get-PHMObjectProperty -InputObject $record -Name 'Name' -DefaultValue '')
+            if ($candidateIds.ContainsKey($id) -or -not $candidateIds.ContainsKey($parentId)) { continue }
+            if ($name -match $protectedPattern) {
+                $skipped += ConvertTo-PHMProcessSummary -Record $record -Reason '保护进程：父进程属于项目，但本进程仍默认跳过。'
+                continue
+            }
+            $summary = ConvertTo-PHMProcessSummary -Record $record -Evidence "父进程 $parentId 已由完整项目路径确认"
+            $candidates += $summary
+            $candidateIds[$id] = $true
+            $addedChild = $true
+        }
+    }
+
+    $estimatedMemory = 0.0
+    foreach ($candidate in $candidates) { $estimatedMemory += [double]$candidate.MemoryMB }
+    [pscustomobject]@{
+        ProjectPath      = $normalizedProjectPath
+        GeneratedAt      = (Get-Date).ToUniversalTime().ToString('o')
+        StopCandidates   = @($candidates | Sort-Object Id -Unique)
+        Skipped          = @($skipped | Sort-Object Id -Unique)
+        Uncertain        = @($uncertain | Sort-Object Id -Unique)
+        EstimatedMemoryMB = [math]::Round($estimatedMemory, 2)
+        RequiresConfirmation = $true
+    }
+}
+
+function Invoke-PHMDefaultProcessStopper {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Candidate)
+
+    try {
+        $process = Get-Process -Id ([int]$Candidate.Id) -ErrorAction Stop
+        if ($process.HasExited) {
+            return [pscustomobject]@{ Exited = $true; Error = $null }
+        }
+
+        $closeRequested = $false
+        try { $closeRequested = $process.CloseMainWindow() } catch { $closeRequested = $false }
+        if ($closeRequested) {
+            try { $process.WaitForExit(2000) | Out-Null } catch {}
+            $process.Refresh()
+        }
+
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -ErrorAction Stop
+            try { $process.WaitForExit(3000) | Out-Null } catch {}
+        }
+
+        $stillRunning = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+        [pscustomobject]@{ Exited = ($null -eq $stillRunning); Error = if ($stillRunning) { '进程未退出' } else { $null } }
+    }
+    catch {
+        $existing = Get-Process -Id ([int]$Candidate.Id) -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            return [pscustomobject]@{ Exited = $true; Error = $null }
+        }
+        return [pscustomobject]@{ Exited = $false; Error = $_.Exception.Message }
+    }
+}
+
+function Suspend-PHMProject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [object[]]$ProcessRecords,
+        [switch]$ConfirmStop,
+        [scriptblock]$ProcessStopper
+    )
+
+    if (-not (Test-Path -LiteralPath $ProjectPath -PathType Container)) {
+        throw "项目文件夹不存在：$ProjectPath"
+    }
+
+    $planParameters = @{ ProjectPath = $ProjectPath }
+    if ($PSBoundParameters.ContainsKey('ProcessRecords')) {
+        $planParameters.ProcessRecords = @($ProcessRecords)
+    }
+    $plan = Get-PHMProjectProcessPlan @planParameters
+    $expected = if ($plan.StopCandidates.Count -gt 0) {
+        "预计停止 $($plan.StopCandidates.Count) 个明确属于项目的进程，预计释放 $($plan.EstimatedMemoryMB) MB 内存；归属不明和保护进程保持运行。"
+    }
+    else {
+        '没有发现可安全停止的项目进程；确认后仍会更新项目交接状态为已暂停。'
+    }
+
+    if (-not $ConfirmStop) {
+        return [pscustomobject]@{
+            Executed       = $false
+            RequiresConfirmation = $true
+            Plan           = $plan
+            ExpectedResult = $expected
+            Message        = '当前仅为执行预览；尚未停止进程、更新状态或删除文件。'
+        }
+    }
+
+    Initialize-PHMProject -ProjectPath $ProjectPath -ComputerName $ComputerName -InitialState 'local_active' | Out-Null
+    $identityPath = Join-Path $ProjectPath '项目交接\项目身份.json'
+    $identityBefore = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+    $since = if ($identityBefore.last_updated) { [datetime]::Parse([string]$identityBefore.last_updated).ToUniversalTime() } else { [datetime]::MinValue }
+    $changes = Get-PHMProjectChanges -ProjectPath $ProjectPath -Since $since
+
+    $usingCustomStopper = $PSBoundParameters.ContainsKey('ProcessStopper')
+    if (-not $ProcessStopper) {
+        $ProcessStopper = { param($candidate) Invoke-PHMDefaultProcessStopper -Candidate $candidate }
+    }
+    $stopped = @()
+    $failed = @()
+    foreach ($candidate in @($plan.StopCandidates | Sort-Object Id -Descending)) {
+        try {
+            $stopResult = & $ProcessStopper $candidate
+            if ($stopResult -and [bool]$stopResult.Exited) {
+                $stopped += $candidate
+            }
+            else {
+                $failed += [pscustomobject]@{
+                    Id    = $candidate.Id
+                    Name  = $candidate.Name
+                    Error = if ($stopResult) { [string]$stopResult.Error } else { '停止器没有返回结果' }
+                }
+            }
+        }
+        catch {
+            $failed += [pscustomobject]@{ Id = $candidate.Id; Name = $candidate.Name; Error = $_.Exception.Message }
+        }
+    }
+
+    $environmentPath = Update-PHMEnvironmentManifest -ProjectPath $ProjectPath -ComputerName $ComputerName
+    $identity = Update-PHMIdentity -ProjectPath $ProjectPath -ComputerName $ComputerName -Operation 'pause' -State 'local_paused'
+    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '暂停当前项目' -Changes $changes -ValidationResult "停止成功：$($stopped.Count)；停止失败：$($failed.Count)"
+
+    $releasedMemory = 0.0
+    foreach ($candidate in $stopped) { $releasedMemory += [double]$candidate.MemoryMB }
+    if ($usingCustomStopper -or $PSBoundParameters.ContainsKey('ProcessRecords')) {
+        $failedIds = @($failed | ForEach-Object Id)
+        $remaining = @($plan.StopCandidates | Where-Object { $failedIds -contains $_.Id })
+    }
+    else {
+        $remaining = @($plan.StopCandidates | Where-Object { Get-Process -Id ([int]$_.Id) -ErrorAction SilentlyContinue })
+    }
+
+    [pscustomobject]@{
+        Executed                = $true
+        ProjectId               = [string]$identity.project_id
+        State                   = [string]$identity.state
+        Plan                    = $plan
+        StoppedProcesses        = @($stopped)
+        FailedProcesses         = @($failed)
+        RemainingCandidates     = @($remaining)
+        ActualReleasedMemoryMB  = [math]::Round($releasedMemory, 2)
+        EnvironmentPath         = $environmentPath
+        ReportPath              = $reportPath
+        UsedPortableDrive       = $false
+        DeletedFiles            = 0
+    }
+}
+
+Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig, Get-PHMProjectProcessPlan, Suspend-PHMProject

@@ -48,4 +48,21 @@ Describe '项目管家入口' {
         $result.result.State | Should -Be 'local_active'
         Test-Path -LiteralPath (Join-Path $project '项目交接\项目身份.json') | Should -BeTrue
     }
+
+    It 'pause 第一次只预览，明确确认后才更新暂停状态' {
+        $project = Join-Path $TestDrive '暂停入口项目'
+        New-Item -ItemType Directory -Path $project -Force | Out-Null
+        & $entryPath -Action adopt -ProjectPath $project -ComputerName 'TEST-PC' | Out-Null
+
+        $preview = & $entryPath -Action pause -ProjectPath $project -ComputerName 'TEST-PC' | ConvertFrom-Json
+        $before = Get-Content -LiteralPath (Join-Path $project '项目交接\项目身份.json') -Raw | ConvertFrom-Json
+        $executed = & $entryPath -Action pause -ProjectPath $project -ComputerName 'TEST-PC' -ConfirmStop | ConvertFrom-Json
+        $after = Get-Content -LiteralPath (Join-Path $project '项目交接\项目身份.json') -Raw | ConvertFrom-Json
+
+        $preview.executed | Should -BeFalse
+        $preview.requiresConfirmation | Should -BeTrue
+        $before.state | Should -Be 'local_active'
+        $executed.executed | Should -BeTrue
+        $after.state | Should -Be 'local_paused'
+    }
 }

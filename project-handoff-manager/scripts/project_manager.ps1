@@ -10,7 +10,8 @@ param(
     [string]$ComputerName = $env:COMPUTERNAME,
     [string]$CurrentTask,
     [string]$NextStep,
-    [string]$ValidationResult
+    [string]$ValidationResult,
+    [switch]$ConfirmStop
 )
 
 $modulePath = Join-Path $PSScriptRoot 'ProjectManager.Core.psm1'
@@ -61,6 +62,22 @@ if ($Action -in @('adopt', 'resume', 'checkpoint')) {
         action   = $Action
         message  = '操作完成；项目仍在本机，未使用 T9，未删除文件。'
         result   = $result
+    } | ConvertTo-Json -Depth 12
+    exit 0
+}
+
+if ($Action -eq 'pause') {
+    if (-not $ProjectPath) {
+        throw "操作 'pause' 必须提供 -ProjectPath。"
+    }
+    $result = Suspend-PHMProject -ProjectPath $ProjectPath -ComputerName $ComputerName -ConfirmStop:$ConfirmStop
+    [pscustomobject]@{
+        safeMode             = $true
+        executed             = [bool]$result.Executed
+        requiresConfirmation = [bool](-not $result.Executed)
+        action               = 'pause'
+        message              = if ($result.Executed) { '项目已暂停；已更新交接信息。T9 未使用，文件未删除。' } else { '这是执行预览；确认清单后使用 -ConfirmStop 执行。' }
+        result               = $result
     } | ConvertTo-Json -Depth 12
     exit 0
 }
