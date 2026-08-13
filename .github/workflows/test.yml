@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           $patterns = @('C:\\Users\\[A-Za-z0-9._-]+', 'gho_[A-Za-z0-9_]+', 'github_pat_[A-Za-z0-9_]+', 'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY')
-          $files = git ls-files
+          $files = Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
           foreach ($pattern in $patterns) {
             $matches = Select-String -Path $files -Pattern $pattern -ErrorAction SilentlyContinue
             if ($matches) { $matches | Format-Table; throw "Private-data pattern found: $pattern" }
