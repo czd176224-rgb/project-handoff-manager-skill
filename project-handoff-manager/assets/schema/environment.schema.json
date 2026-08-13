@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/project-handoff-manager/environment.schema.json",
+  "title": "项目环境清单",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "capturedAt", "platform", "tools"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "capturedAt": { "type": "string", "format": "date-time" },
+    "platform": { "type": "string" },
+    "tools": { "type": "array", "items": { "type": "object" } },
+    "dependencyFiles": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}
