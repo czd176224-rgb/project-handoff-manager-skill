@@ -30,6 +30,6 @@ Describe '项目管家核心模块' {
         ($menu | Where-Object Action -eq 'resume').Implemented | Should -BeTrue
         ($menu | Where-Object Action -eq 'pause').Implemented | Should -BeTrue
         ($menu | Where-Object Action -eq 'checkin').Implemented | Should -BeTrue
-        ($menu | Where-Object Action -eq 'checkout').Implemented | Should -BeFalse
+        ($menu | Where-Object Action -eq 'checkout').Implemented | Should -BeTrue
     }
 }

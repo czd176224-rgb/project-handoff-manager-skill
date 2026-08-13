@@ -5,6 +5,22 @@
   "platform": "Windows",
   "tools": [],
   "dependencyFiles": [],
+  "nodeEnvironment": {
+    "status": "not_detected",
+    "dependenciesPresent": false,
+    "lockFile": null,
+    "recoveryCommand": null,
+    "note": "随项目存在的 node_modules 仍需在本机验证，不能保证可直接运行。"
+  },
+  "pythonEnvironment": {
+    "status": "not_detected",
+    "virtualEnvironmentPresent": false,
+    "configurationFile": null,
+    "originalPythonHome": null,
+    "recoverySource": null,
+    "recoveryCommand": null,
+    "note": "复制来的虚拟环境必须检查原 Python 路径，不能保证可直接运行。"
+  },
   "projectCache": {
     "fileCount": 0,
     "totalBytes": 0,

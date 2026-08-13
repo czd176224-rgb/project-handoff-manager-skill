@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "local": {
     "currentProjectsRoot": "D:\\AI项目管理\\01-当前项目",
+    "receivingRoot": "D:\\AI项目管理\\00-待整理\\正在接收",
     "pausedProjectsRoot": "D:\\AI项目管理\\02-暂停项目",
     "additionalRoots": []
   },
@@ -12,6 +13,7 @@
     "friendlyName": "Samsung PSSD T9",
     "repositoryRoot": "T:\\AI开发工作盘\\项目仓库",
     "deviceMarkerPath": "T:\\AI开发工作盘\\管理资料\\项目管家设备.json",
+    "localTrustPath": "D:\\AI项目管理\\项目管家设备信任.json",
     "volumeSerial": null,
     "deviceId": null
   }
