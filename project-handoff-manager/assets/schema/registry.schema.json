@@ -13,11 +13,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["projectId", "projectName", "status", "location"],
+        "required": ["projectId", "projectName", "state", "location"],
         "properties": {
           "projectId": { "type": "string", "format": "uuid" },
           "projectName": { "type": "string", "minLength": 1 },
-          "status": { "type": "string" },
+          "state": { "type": "string" },
           "location": { "type": "string" },
           "updatedAt": { "type": "string", "format": "date-time" }
         }
