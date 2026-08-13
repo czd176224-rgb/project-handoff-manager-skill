@@ -35,4 +35,4 @@ Invoke-Pester -Path .\tests
 
 ## 许可证
 
-公开发布前确定。
+[MIT](LICENSE)

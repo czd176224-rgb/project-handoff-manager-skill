@@ -27,6 +27,7 @@ Describe '项目管家核心模块' {
             '从 T9 借出项目到本机'
         )
         $menu.RequiresPreview | Should -Not -Contain $false
-        $menu.Implemented | Should -Not -Contain $true
+        ($menu | Where-Object Action -eq 'resume').Implemented | Should -BeTrue
+        ($menu | Where-Object Action -in @('pause', 'checkin', 'checkout')).Implemented | Should -Not -Contain $true
     }
 }

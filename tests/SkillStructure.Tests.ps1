@@ -15,6 +15,12 @@ Describe 'Codex Skill 公开包结构' {
         }
     }
 
+    It '公开仓库采用 MIT 许可证' {
+        $licensePath = Join-Path $repoRoot 'LICENSE'
+        Test-Path -LiteralPath $licensePath | Should -BeTrue
+        Get-Content -LiteralPath $licensePath -Raw | Should -Match '^MIT License'
+    }
+
     It '包含标准项目的五个中文目录' {
         @('输入资料', '输出成果', '项目缓存', '离线依赖', '项目交接') | ForEach-Object {
             Test-Path -LiteralPath (Join-Path $skillRoot "assets\standard-project\$_") | Should -BeTrue

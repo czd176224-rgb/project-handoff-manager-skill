@@ -1,8 +1,21 @@
 {
   "schemaVersion": 1,
   "capturedAt": null,
+  "computerName": null,
   "platform": "Windows",
   "tools": [],
   "dependencyFiles": [],
+  "projectCache": {
+    "fileCount": 0,
+    "totalBytes": 0,
+    "lastModified": null,
+    "available": true
+  },
+  "offlineDependencies": {
+    "fileCount": 0,
+    "totalBytes": 0,
+    "lastModified": null,
+    "available": true
+  },
   "notes": []
 }

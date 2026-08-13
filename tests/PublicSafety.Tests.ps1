@@ -18,7 +18,8 @@ Describe '公开仓库安全边界' {
         $schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
 
         $schema.additionalProperties | Should -BeFalse
-        $schema.required | Should -Contain 'projectId'
-        $schema.required | Should -Contain 'status'
+        $schema.required | Should -Contain 'project_id'
+        $schema.required | Should -Contain 'official_location'
+        $schema.required | Should -Contain 'state'
     }
 }
