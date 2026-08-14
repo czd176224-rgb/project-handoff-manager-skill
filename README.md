@@ -1,149 +1,289 @@
-# 项目管家（Project Handoff Manager）
+# 带着项目走，换台电脑继续做
 
-面向 Windows 本地 AI 开发环境的项目文件夹管理 Skill。它帮助用户在本机与 NTFS 移动硬盘之间安全归还、借出完整项目，并在迁移前更新交接记录、缓存清单和离线依赖信息，可在 Codex、DeepSeek 等不同 AI 软件中继续同一个本地任务。
+**Project Handoff Manager（项目管家）** 是一个面向 Windows 本地 AI 开发项目的开源 Skill。它把完整项目文件夹、当前进度、环境说明和继续任务提示一起交给移动硬盘，让你换电脑或换 AI 软件后，不必重新解释项目，也不必猜上次做到哪里。
 
-## 当前状态
+[![Release](https://img.shields.io/github/v/release/czd176224-rgb/project-handoff-manager-skill?label=release)](https://github.com/czd176224-rgb/project-handoff-manager-skill/releases/latest)
+[![Windows tests](https://github.com/czd176224-rgb/project-handoff-manager-skill/actions/workflows/test.yml/badge.svg)](https://github.com/czd176224-rgb/project-handoff-manager-skill/actions/workflows/test.yml)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE)](https://github.com/PowerShell/PowerShell)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-`1.1.1` 稳定版。保持四项菜单和简单迁移流程，补充真实交接结果、AI 中立继续提示词、归还清理恢复和简洁中文呈现。迁移预览只读取元数据；完整复制校验会计算哈希，并在后续校验中复用元数据未变化文件的既有哈希。
+[5 分钟开始使用](#5-分钟开始使用) · [它解决什么问题](#它解决什么问题) · [安全机制](#为什么可以放心迁移) · [最新版本](https://github.com/czd176224-rgb/project-handoff-manager-skill/releases/latest)
+
+> 它不是云同步工具，也不会搬运 AI 软件的对话数据库。它只管理你明确指定的项目文件夹，并让项目本身携带可继续工作的交接信息。
+
+## 它解决什么问题
+
+直接复制一个项目文件夹，看起来简单，真正继续工作时却经常遇到这些问题：
+
+- 不知道电脑和移动硬盘上的哪一份才是正式版本。
+- 项目复制完了，但另一台电脑缺少环境说明、缓存状态或恢复命令。
+- 换了 AI 软件，对方不知道项目目标、限制、当前任务和下一步。
+- 想释放本机空间，又担心副本没有复制完整就误删源文件。
+- 迁移中断后，不知道应该重新复制、保留双份还是继续收尾。
+
+项目管家把这些问题收敛成一条可检查、可恢复的迁移流程：
+
+```mermaid
+flowchart LR
+    A["电脑 A：本机项目"] --> B["归还预览"]
+    B --> C["复制到移动硬盘暂存区"]
+    C --> D["完整性校验"]
+    D --> E["移动硬盘正式副本"]
+    E --> F["电脑 B：借出并校验"]
+    F --> G["本机正式项目"]
+    G --> H["任意 AI 软件读取交接文件继续任务"]
+```
+
+复制成功并不等于立即删除。源副本会继续保留，只有用户之后明确发布独立清理指令，项目管家才会再次核对设备、路径、回执和项目身份。
 
 ## 四项日常操作
 
-1. 开始或继续当前项目：补齐管理结构，读取交接记录，刷新环境清单。
-2. 暂停当前项目：预览并仅停止能证明属于项目的进程，记录下一步。
-3. 将当前项目归还到 T9：暂存复制、哈希校验、正式提升，独立确认后清理本机来源。
-4. 从 T9 借出项目到本机：暂存复制、校验提升、恢复环境与交接，独立确认后清理 T9 来源。
+| 操作 | 实际做什么 | 解决的问题 |
+| --- | --- | --- |
+| 开始或继续项目 | 自动补齐管理结构，读取交接报告并检查环境 | 换电脑或换 AI 后快速恢复上下文 |
+| 暂停项目 | 预览并只停止能够证明属于该项目的进程，记录当前任务和下一步 | 释放 CPU、内存，同时保留清晰进度 |
+| 归还到移动硬盘 | 暂存复制、完整性校验、提交正式副本；本机来源暂不删除 | 安全带走完整项目，避免复制不完整 |
+| 从移动硬盘借出 | 复制到本机暂存区、复核来源、校验并提升为正式目录 | 在另一台电脑继续本地项目 |
 
-## 安装、验证与升级
+迁移失败时还有辅助的 `repair` 恢复入口。它只完成尚未完成的状态更新或清理步骤，不会盲目重新复制、重复删除。
 
-从仓库根目录安装完整 Skill；`-DestinationRoot` 指向 Codex 的用户 `skills` 根，而不是具体 Skill 子目录：
+## 适合哪些场景
 
-```powershell
-.\scripts\install.ps1 -DestinationRoot 'D:\CodexUser\skills'
-.\scripts\verify_install.ps1 -DestinationRoot 'D:\CodexUser\skills'
-```
+### 在两台 Windows 电脑之间继续同一项目
 
-省略 `-DestinationRoot` 时，安装器优先使用 `$env:CODEX_HOME\skills`，否则使用当前用户的 `.codex\skills`。目标内容完全相同时会返回“已安装”且不重复复制；目标不同会停止。确认升级时显式使用 `-Force`，安装器会先创建可恢复备份，再校验暂存副本并替换：
+在电脑 A 归还到移动硬盘，带到电脑 B 后借出到本机。项目身份、进度和环境说明与文件夹一起移动。
 
-```powershell
-.\scripts\install.ps1 -DestinationRoot 'D:\CodexUser\skills' -Force
-```
+### 从 Codex 切换到 DeepSeek 或其他 AI 软件
 
-安装完成后重新启动 Codex 或开始一个新任务，使 Skill 清单重新加载。
+项目会生成一份软件中立的 `项目交接/继续项目提示词.md`。只要新的 AI 软件能够访问本地项目文件夹，就可以先读取交接报告、环境清单和继续提示词，再接着完成任务。
 
-## 安全原则
+### 暂停大项目并释放电脑资源
 
-- 校验目标副本成功前绝不删除源副本。
-- 清理源副本必须是单独确认的操作。
-- 不读取或迁移 Codex 桌面版数据库和对话数据库。
-- 不迁移令牌、Cookie、密码和系统级软件。
-- 公开仓库仅使用虚拟测试数据，不包含真实项目和设备身份。
-- 只有完整项目路径或其已确认父进程关系能证明归属时，进程才进入停止候选。
-- Codex 主程序、Windows 系统保护进程和只有项目名称的模糊匹配默认跳过。
+项目管家会先展示准备停止的进程和判定依据。只有能证明属于当前项目的进程才进入候选；AI 主程序、系统进程和归属不明的进程默认跳过。
 
-## 暂停项目
+### 离线携带项目、依赖和缓存
 
-第一次运行只生成预览：
+整个项目目录可以随移动硬盘保留，包括项目内的缓存、离线依赖、`.venv` 或 `node_modules`。这些内容会被记录，但跨电脑后仍应根据锁文件和环境清单验证或重建。
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action pause -ProjectPath 'D:\项目\示例项目'
-```
+## 5 分钟开始使用
 
-确认预览中的 PID、命令和判定证据后，再明确执行：
+### 1. 准备环境
+
+- Windows 10 或 Windows 11
+- Windows PowerShell 5.1，或 PowerShell 7+
+- 一块 NTFS 移动硬盘
+- Codex 等能够调用本地 Skill/脚本的 AI 工具
+
+仓库示例使用 Samsung T9 和 `T:` 盘符，但盘符、卷标、设备型号和仓库路径都由配置文件指定，并非只能使用该型号或该盘符。
+
+### 2. 安装 Skill
 
 ```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action pause -ProjectPath 'D:\项目\示例项目' -ConfirmStop
+git clone https://github.com/czd176224-rgb/project-handoff-manager-skill.git
+cd project-handoff-manager-skill
+pwsh -File .\scripts\install.ps1
+pwsh -File .\scripts\verify_install.ps1
 ```
 
-## 归还到 T9
+没有 Git 也可以从 [最新 Release](https://github.com/czd176224-rgb/project-handoff-manager-skill/releases/latest) 下载源码压缩包，解压后在该目录执行后两条命令。
 
-第一次运行只显示完整计划，不复制：
+默认安装到 `$env:CODEX_HOME\skills`；没有设置 `CODEX_HOME` 时安装到当前用户的 `.codex\skills`。安装完成后重新启动 AI 工具或开始一个新任务，让 Skill 清单重新加载。
+
+### 3. 建立自己的配置
+
+复制 [`config.example.json`](config.example.json) 到仓库之外，例如：
 
 ```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json'
+Copy-Item .\config.example.json 'D:\AI项目管理\项目管家配置.json'
 ```
 
-确认磁盘身份、源路径、暂存路径、正式路径、文件数量、敏感文件和进程清单后，执行复制与校验：
+然后修改三类路径：
+
+- 本机当前项目、接收暂存和暂停项目目录。
+- 移动硬盘中的项目仓库和设备标记位置。
+- 当前电脑保存设备信任记录的位置。
+
+真实配置、卷序列、设备标识和信任文件不要提交到公开仓库。
+
+### 4. 用自然语言开始
+
+在项目文件夹中对 AI 说：
+
+```text
+使用 $project-handoff-manager，显示项目菜单，并用简洁中文告诉我下一步。
+```
+
+第一次归还项目时可以说：
+
+```text
+使用项目管家，把当前项目归还到移动硬盘。先只显示预览，不复制、不删除文件。
+```
+
+在另一台电脑借出时可以说：
+
+```text
+使用项目管家，从移动硬盘借出这个项目到本机。先检查路径、空间和设备身份。
+```
+
+AI 会解析脚本的 JSON 结果，再向用户显示简洁中文，而不是直接铺开机器接口。
+
+<details>
+<summary><strong>首次登记移动硬盘的技术说明</strong></summary>
+
+正式归还或清理前，当前电脑需要保存移动硬盘的卷序列和随机设备标识。登记分为预览和确认两个阶段：
 
 ```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json' -ConfirmTransfer -ConfirmProcessStop
+$skillPath = if ($env:CODEX_HOME) {
+    Join-Path $env:CODEX_HOME 'skills\project-handoff-manager'
+} else {
+    Join-Path $env:USERPROFILE '.codex\skills\project-handoff-manager'
+}
+
+Import-Module (Join-Path $skillPath 'scripts\ProjectManager.Core.psm1') -Force
+$drive = Get-PHMPortableDriveInfo `
+    -DriveLetter 'T:' `
+    -DeviceMarkerPath 'T:\AI开发工作盘\管理资料\项目管家设备.json'
+
+Register-PHMPortableDevice `
+    -DriveInfo $drive `
+    -DeviceMarkerPath 'T:\AI开发工作盘\管理资料\项目管家设备.json' `
+    -LocalTrustPath 'D:\AI项目管理\项目管家设备信任.json'
+
+Register-PHMPortableDevice `
+    -DriveInfo $drive `
+    -DeviceMarkerPath 'T:\AI开发工作盘\管理资料\项目管家设备.json' `
+    -LocalTrustPath 'D:\AI项目管理\项目管家设备信任.json' `
+    -ConfirmRegistration
 ```
 
-这一步不会删除本机来源。目标校验通过且没有继续修改项目后，再使用结果中的精确目标路径完成清理：
+请按自己的盘符和路径修改示例。设备标记保存在移动硬盘，信任记录只保存在当前电脑；另一台电脑需要单独建立本机信任。
+
+</details>
+
+## 一次完整迁移会发生什么
+
+### 从电脑 A 归还到移动硬盘
+
+1. 扫描项目元数据、运行进程、敏感文件和路径风险。
+2. 用户确认后，将项目复制到移动硬盘的空暂存目录。
+3. 复核来源并校验目标文件清单、大小和哈希。
+4. 校验通过后把暂存目录提升为正式项目目录。
+5. 本机来源继续保留；只有独立清理确认后才删除。
+
+### 在电脑 B 从移动硬盘借出
+
+1. 检查设备身份、仓库边界、可用空间和目标冲突。
+2. 把项目复制到本机接收暂存区并完成校验。
+3. 提升为本机正式项目，生成环境检查和继续提示词。
+4. 移动硬盘来源继续保留，可以先在本机工作。
+5. 需要释放移动硬盘空间时，再另行发布删除旧来源的指令。
+
+## 为什么可以放心迁移
+
+- **先预览**：普通预览只读取配置范围和项目元数据，不进行复制或删除。
+- **先暂存**：复制先进入空暂存目录，不直接覆盖正式项目。
+- **再校验**：来源复核和目标完整性校验通过后，才提交正式副本。
+- **删除独立确认**：传输成功不会自动删除来源，清理是之后的独立操作。
+- **路径边界保护**：只允许处理配置仓库中的单个项目目录，并阻断重解析点和错误卷。
+- **失败可恢复**：提升、登记或清理中断时保留恢复记录，`repair` 只补齐剩余步骤。
+- **不碰 AI 对话数据**：不会读取、修改或复制 Codex/其他 AI 软件的对话数据库。
+- **凭据不属于支持范围**：令牌、Cookie、密码和系统级软件不属于迁移目标；预览发现敏感文件时会提示，正式迁移前应先移出项目。
+
+任何文件工具都不能替代备份。重要项目仍建议保留独立备份，并在首次使用时先用测试项目完成一次全流程。
+
+## 项目会携带哪些交接信息
+
+项目管家在项目内维护 `项目交接` 目录，常见文件包括：
+
+| 文件 | 用途 |
+| --- | --- |
+| `项目身份.json` | 项目编号、正式位置、当前状态和修订信息 |
+| `项目交接报告.md` | 项目目标、当前任务、下一步、变更和验证结果 |
+| `环境清单.json` | Node、Python、锁文件、缓存和离线依赖状态 |
+| `继续项目提示词.md` | 可交给不同 AI 软件的继续任务说明 |
+| `转移凭证.json` | 迁移方向、来源、目标和校验依据 |
+| `*恢复.json` | 中断后只完成剩余步骤的恢复记录 |
+
+## 命令行参考
+
+日常使用可以交给 AI 调用；需要调试或自动化时，也可以直接运行入口脚本。
 
 ```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkin -ProjectPath 'D:\项目\示例项目' -TargetPath 'T:\AI开发工作盘\项目仓库\暂停项目\示例项目' -ConfirmCleanup
+$entry = '.\project-handoff-manager\scripts\project_manager.ps1'
+$config = 'D:\AI项目管理\项目管家配置.json'
+
+# 菜单
+pwsh -File $entry -Action menu
+
+# 项目总览
+pwsh -File $entry -Action inspect -ConfigPath $config
+
+# 开始或继续项目
+pwsh -File $entry -Action resume -ProjectPath 'D:\项目\示例项目'
+
+# 归还预览，不复制
+pwsh -File $entry -Action checkin -ProjectPath 'D:\项目\示例项目' -ConfigPath $config
+
+# 借出预览，不复制
+pwsh -File $entry -Action checkout -ProjectPath 'T:\项目仓库\暂停项目\示例项目' -ConfigPath $config
 ```
 
-如果本机或 T9 副本在等待清理期间发生变化，工具会阻止删除并标记冲突。
+执行复制、停止进程或清理时，需要在预览后显式加入对应的确认参数。完整参数以脚本输出的精确路径和下一步为准。
 
-## 从 T9 借出到本机
+## 当前边界
 
-配置文件中的 `local.currentProjectsRoot` 是本机正式项目根，`local.receivingRoot` 是借出暂存根。第一次运行只生成预览，不复制：
+- 当前正式支持 Windows 10/11 和 NTFS 移动硬盘。
+- 项目文件夹是事实来源；Skill 不迁移 AI 软件自身的会话和设置。
+- 项目内缓存和虚拟环境可以随项目保留，但不保证跨电脑后无需验证即可运行。
+- 环境检查目前重点识别 Node.js、Python、锁文件、项目缓存和离线依赖。
+- 项目管家不是云备份、版本控制或多人实时协作工具。
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkout -ProjectPath 'T:\AI开发工作盘\项目仓库\暂停项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json'
-```
+## 常见问题
 
-确认磁盘身份、来源路径确实位于该磁盘盘符、空间、冲突、重解析点、来源清单、本机暂存路径和正式路径后，执行复制、来源复核、目标哈希校验和原子提升：
+### 必须使用 Samsung T9 或固定盘符吗？
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkout -ProjectPath 'T:\AI开发工作盘\项目仓库\暂停项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json' -ConfirmTransfer
-```
+不是。T9 和 `T:` 只是默认示例。盘符、卷标、设备型号、仓库路径和设备标记路径都可以在配置文件中修改。当前要求移动硬盘使用 NTFS。
 
-这一步会生成环境检查结果和一份 AI 软件中立的 `项目交接/继续项目提示词.md`，但不会删除 T9 来源。用户可以先在本机继续工作；需要释放移动硬盘空间时，再使用结果中的精确本机路径发布独立清理指令：
+### 可以在 DeepSeek、Claude 或其他 AI 软件中继续吗？
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action checkout -ProjectPath 'T:\AI开发工作盘\项目仓库\暂停项目\示例项目' -TargetPath 'D:\AI项目管理\01-当前项目\示例项目' -ConfirmCleanup
-```
+可以继续项目内容。项目管家生成的交接报告、环境清单和继续提示词都是项目内的普通 Markdown/JSON 文件，不绑定某个 AI 产品。不同软件能否直接安装 Skill，取决于它们各自的扩展机制；即使不能安装，也可以读取这些交接文件继续任务。
 
-工具会复核设备身份、仓库边界、借出回执、项目编号和精确路径，然后只删除 T9 上的旧来源；本机在借出后产生的新工作不会阻断该独立清理。清理成功后，打开本机正式项目，先读交接报告和环境清单，验证或重建 Node/Python 环境，再继续上次未完成工作。项目缓存、离线依赖、`node_modules` 和 `.venv` 的存在只代表它们随项目保留，不承诺可直接运行。
+### 它会上传项目到云端吗？
 
-如果复制提升后的交接最终化失败，或清理 T9 来源时磁盘占用导致删除失败，不要重新借出，也不要手工删除。保持 T9 连接，使用本机正式项目路径运行恢复；入口会自动识别应继续“最终化”还是只重试“清理与登记”：
+不会。核心迁移发生在本机文件夹和移动硬盘之间。
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action repair -TargetPath 'D:\AI项目管理\01-当前项目\示例项目' -ConfigPath 'D:\AI项目管理\项目管家配置.json'
-```
+### 传输完成后会自动删除原项目吗？
 
-恢复会重新校验设备身份、磁盘盘符、仓库边界、恢复记录和项目身份。借出清理恢复不会重新复制项目，只重试尚未完成的 T9 旧来源清理与登记。
+不会。传输和清理是两个独立操作。源副本在校验成功后仍然保留，只有用户再次明确要求清理时才进入删除流程。
 
-如果归还清理已删除本机来源，但移动硬盘目标的身份、交接报告或登记更新失败，对包含 `项目交接/归还清理恢复.json` 的移动硬盘项目运行 `repair`。它只补齐目标状态和登记，不重新复制，也不会再次删除来源。
+### 项目很大，会不会每次打开菜单都计算全部哈希？
 
-脚本继续返回稳定 JSON 供 AI 软件解析；默认用户界面只显示简洁中文菜单、关键路径、校验结果、安全状态和唯一下一步，不直接铺开原始 JSON。
+不会。预览使用元数据扫描；正式传输校验才计算完整性信息，后续可复用元数据未变化文件的既有哈希。
 
-## 在另一台电脑继续
+### 支持 macOS 或 Linux 吗？
 
-1. 在电脑 A 将项目归还到已验证的 T9，完成校验后再单独确认清理 A。
-2. 将 T9 连接到电脑 B，先完成该电脑的一次性设备信任配置。
-3. 在电脑 B 预览并执行“从 T9 借出项目到本机”，校验成功后再单独确认清理 T9 来源。
-4. 打开本机正式项目，阅读 `项目交接/项目交接报告.md` 和 `项目交接/继续项目提示词.md`，按 `环境清单.json` 验证或重建环境，再继续工作。
-5. 工作完成后从电脑 B 重新归还到 T9；校验成功并清理 B 后，T9 才再次成为唯一正式副本。
+当前不支持。现版本使用 Windows PowerShell、Windows 进程信息和 NTFS 移动硬盘边界。
 
-## 依赖环境边界
+## 工程验证
 
-- Skill 管理项目文件和项目内的环境说明，不安装系统级软件，不迁移登录凭据、令牌或 Cookie。
-- `.venv`、`node_modules`、项目缓存和离线依赖可以作为项目内容保留，但跨电脑复制后不保证可直接运行。
-- 应根据锁文件、版本清单和环境检查结果验证或重建 Python、Node.js 等运行环境。
-- 不读取、修改或复制 Codex 桌面版数据库与对话数据库。
+`v1.1.1` 发布前完成了 133 项 Pester 测试，覆盖：
 
-## 运行骨架
+- 安装、重复安装、可恢复升级和独立目录验证。
+- 项目纳管、交接报告、环境检查和 AI 中立继续提示词。
+- 归还、借出、独立清理和三类中断恢复路径。
+- 错误磁盘、路径越界、重解析点、目标冲突和不可读文件。
+- Windows PowerShell 5.1、PowerShell 7+ 和公开文件隐私扫描。
 
-```powershell
-pwsh -File .\project-handoff-manager\scripts\project_manager.ps1 -Action menu
-```
+GitHub Actions 在每次 PR 和 `main` 推送时运行 Windows 测试、Skill 验证、隔离安装及隐私检查。测试源码位于 [`tests`](tests)，工作流位于 [`.github/workflows/test.yml`](.github/workflows/test.yml)。
 
-## 测试
+## 参与项目
 
-```powershell
-Invoke-Pester -Path .\tests
-```
+- 遇到问题：提交 [Issue](https://github.com/czd176224-rgb/project-handoff-manager-skill/issues)，请使用虚拟路径并删除设备序列号、信任记录和凭据。
+- 发现安全问题：请阅读 [`SECURITY.md`](SECURITY.md)，通过 GitHub Security Advisory 私下报告。
+- 准备贡献代码：请先阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
-## 兼容目标
-
-- Windows 10/11
-- Windows PowerShell 5.1 或 PowerShell 7+
-- NTFS 移动硬盘
-- Codex 桌面版项目工作流
+如果这个 Skill 帮你顺利完成了一次跨电脑或跨 AI 软件迁移，欢迎给仓库一个 Star，并分享你的使用场景。真实反馈会优先决定下一步改进，而不是继续堆叠附加功能。
 
 ## 许可证
 
-这是可独立安装和发布的开源项目，采用 [MIT](LICENSE) 许可证，不依赖原开发仓库才能运行。
+[MIT License](LICENSE)
