@@ -31,6 +31,8 @@ Describe '从 T9 借出执行计划' {
         $plan.ReceivingPath|Should -Be (Join-Path $receivingRoot "$($identity.project_id)\借出项目")
         $plan.OfficialPath|Should -Be (Join-Path $currentRoot '借出项目')
         $plan.Inventory.FileCount|Should -BeGreaterThan 3
+        $plan.ExpectedResult|Should -Match '之后另行发布删除移动硬盘中该项目的指令'
+        $plan.ExpectedResult|Should -Not -Match '第二次确认'
         Test-Path -LiteralPath $plan.ReceivingPath|Should -BeFalse
         Test-Path -LiteralPath $plan.OfficialPath|Should -BeFalse
     }

@@ -1,4 +1,4 @@
-﻿Describe 'v1.0.0 Skill 安装与隔离验证' {
+﻿Describe 'v1.1.1 Skill 安装与隔离验证' {
     BeforeAll {
         $repoRoot = Split-Path $PSScriptRoot -Parent
         $installer = Join-Path $repoRoot 'scripts\install.ps1'
@@ -15,7 +15,7 @@
 
         $result.Status | Should -Be 'Installed'
         $validation.Valid | Should -BeTrue
-        $validation.Version | Should -Be '1.0.0'
+        $validation.Version | Should -Be '1.1.1'
         Test-Path -LiteralPath (Join-Path $installed 'SKILL.md') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $installed 'scripts\ProjectManager.Core.psm1') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $installed 'tests') | Should -BeFalse
