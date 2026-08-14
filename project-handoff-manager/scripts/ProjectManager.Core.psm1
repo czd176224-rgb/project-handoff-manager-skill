@@ -6,7 +6,7 @@ function Get-PHMVersion {
 
     [pscustomobject]@{
         Name          = 'project-handoff-manager'
-        Version       = '1.0.0'
+        Version       = '1.1.1'
         SchemaVersion = 1
     }
 }
@@ -466,6 +466,7 @@ function Add-PHMHandoffRecord {
         [Parameter(Mandatory)][string]$ComputerName,
         [Parameter(Mandatory)][string]$ActionLabel,
         [Parameter(Mandatory)]$Changes,
+        [Parameter(Mandatory)][string]$ResultSummary,
         [string]$CurrentTask,
         [string]$NextStep,
         [string]$ValidationResult
@@ -487,7 +488,7 @@ function Add-PHMHandoffRecord {
         "- 新输出：$outputs",
         "- 未分类变化：$other",
         "- 最后验证：$ValidationResult",
-        '- 结果：项目仍在本机；未使用 T9；未删除文件。'
+        "- 结果：$ResultSummary"
     ) -join [Environment]::NewLine
     Write-PHMUtf8File -Path $reportPath -Content ($existing.TrimEnd() + [Environment]::NewLine + $record + [Environment]::NewLine)
     return $reportPath
@@ -570,7 +571,7 @@ function Resume-PHMProject {
     $changes = Get-PHMProjectChanges -ProjectPath $ProjectPath -Since $since
     $environmentPath = Update-PHMEnvironmentManifest -ProjectPath $ProjectPath -ComputerName $ComputerName
     $identity = Update-PHMIdentity -ProjectPath $ProjectPath -ComputerName $ComputerName -Operation 'resume' -State 'local_active'
-    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '开始或继续' -Changes $changes
+    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '开始或继续' -Changes $changes -ResultSummary '项目已在本机继续；未使用移动硬盘；未删除文件。'
 
     [pscustomobject]@{
         ProjectId       = [string]$identity.project_id
@@ -602,7 +603,7 @@ function Save-PHMCheckpoint {
     $environmentPath = Update-PHMEnvironmentManifest -ProjectPath $ProjectPath -ComputerName $ComputerName
     Update-PHMTaskSections -ProjectPath $ProjectPath -CurrentTask $CurrentTask -NextStep $NextStep -ValidationResult $ValidationResult
     $identity = Update-PHMIdentity -ProjectPath $ProjectPath -ComputerName $ComputerName -Operation 'checkpoint' -State ([string]$identityBefore.state)
-    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '记录当前进度' -Changes $changes -CurrentTask $CurrentTask -NextStep $NextStep -ValidationResult $ValidationResult
+    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '记录当前进度' -Changes $changes -ResultSummary '当前进度已记录；项目位置和文件未发生迁移。' -CurrentTask $CurrentTask -NextStep $NextStep -ValidationResult $ValidationResult
 
     [pscustomobject]@{
         ProjectId         = [string]$identity.project_id
@@ -937,7 +938,7 @@ function Suspend-PHMProject {
 
     $environmentPath = Update-PHMEnvironmentManifest -ProjectPath $ProjectPath -ComputerName $ComputerName
     $identity = Update-PHMIdentity -ProjectPath $ProjectPath -ComputerName $ComputerName -Operation 'pause' -State 'local_paused'
-    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '暂停当前项目' -Changes $changes -ValidationResult "停止成功：$($stopped.Count)；停止失败：$($failed.Count)"
+    $reportPath = Add-PHMHandoffRecord -ProjectPath $ProjectPath -ComputerName $ComputerName -ActionLabel '暂停当前项目' -Changes $changes -ResultSummary "项目已暂停；停止成功：$($stopped.Count)；停止失败：$($failed.Count)；未删除文件。" -ValidationResult "停止成功：$($stopped.Count)；停止失败：$($failed.Count)"
 
     $releasedMemory = 0.0
     foreach ($candidate in $stopped) { $releasedMemory += [double]$candidate.MemoryMB }
@@ -1127,7 +1128,12 @@ function Get-PHMStringHash {
 
 function Get-PHMProjectInventory {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ProjectPath)
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [switch]$MetadataOnly,
+        [object]$BaselineInventory,
+        [scriptblock]$HashProvider
+    )
 
     if (-not (Test-Path -LiteralPath $ProjectPath -PathType Container)) {
         throw "项目文件夹不存在：$ProjectPath"
@@ -1139,6 +1145,18 @@ function Get-PHMProjectInventory {
     $directories = @()
     $reparsePoints = @()
     $unreadable = @()
+    $baselineByPath = @{}
+    if ($BaselineInventory) {
+        foreach ($baselineFile in @($BaselineInventory.Files)) {
+            $baselineByPath[[string]$baselineFile.RelativePath.ToLowerInvariant()] = $baselineFile
+        }
+    }
+    if (-not $HashProvider) {
+        $HashProvider = {
+            param($path)
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        }
+    }
 
     while ($stack.Count -gt 0) {
         $directoryPath = $stack.Pop()
@@ -1180,18 +1198,30 @@ function Get-PHMProjectInventory {
                 IsCritical   = $isCritical
                 IsBulky      = ($relativePath -match '^(?i:node_modules|\.venv|项目缓存|离线依赖|\.git\\objects)\\')
                 Hash         = $null
-                HashPolicy   = 'full'
+                HashPolicy   = if ($MetadataOnly) { 'none' } else { 'full' }
             }
         }
     }
 
     $files = @($files | Sort-Object RelativePath)
-    foreach ($file in $files) {
-        try {
-            $file.Hash = (Get-FileHash -LiteralPath $file.FullPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-        }
-        catch {
-            $unreadable += [pscustomobject]@{ RelativePath = $file.RelativePath; Error = $_.Exception.Message }
+    if (-not $MetadataOnly) {
+        foreach ($file in $files) {
+            $key = $file.RelativePath.ToLowerInvariant()
+            $baseline = if ($baselineByPath.ContainsKey($key)) { $baselineByPath[$key] } else { $null }
+            if ($baseline -and $baseline.Hash -and
+                [long]$baseline.Size -eq [long]$file.Size -and
+                [string]$baseline.LastModified -eq [string]$file.LastModified) {
+                $file.Hash = [string]$baseline.Hash
+                $file.HashPolicy = 'reused'
+                continue
+            }
+            try {
+                $file.Hash = ([string](& $HashProvider $file.FullPath)).ToLowerInvariant()
+                $file.HashPolicy = 'full'
+            }
+            catch {
+                $unreadable += [pscustomobject]@{ RelativePath = $file.RelativePath; Error = $_.Exception.Message }
+            }
         }
     }
 
@@ -1253,7 +1283,7 @@ function New-PHMCheckinPlan {
         $projectId = [guid]::NewGuid().ToString()
     }
 
-    $inventory = Get-PHMProjectInventory -ProjectPath $sourcePath
+    $inventory = Get-PHMProjectInventory -ProjectPath $sourcePath -MetadataOnly
     $requiredBytes = [long]($inventory.TotalBytes + [math]::Max(100MB, [math]::Ceiling($inventory.TotalBytes * 0.1)))
     $driveValidation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName -ExpectedVolumeSerial $ExpectedVolumeSerial -ExpectedDeviceId $ExpectedDeviceId -RequiredBytes $requiredBytes
     $receivingPath = Join-Path $PortableRepositoryRoot "正在接收\$projectId\$projectName"
@@ -1381,15 +1411,36 @@ function Compare-PHMProjectInventories {
     }
 }
 
-function Get-PHMCleanupDigest {
+function Get-PHMCleanupSnapshot {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ProjectPath)
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [object]$BaselineInventory
+    )
 
-    $inventory = Get-PHMProjectInventory -ProjectPath $ProjectPath
+    $inventory = if ($BaselineInventory) {
+        Get-PHMProjectInventory -ProjectPath $ProjectPath -BaselineInventory $BaselineInventory
+    }
+    else {
+        Get-PHMProjectInventory -ProjectPath $ProjectPath
+    }
     $lines = @($inventory.Files | Where-Object { $_.RelativePath -notin @('项目交接\转移凭证.json', '项目交接\借出最终化恢复.json') } | ForEach-Object {
         "$($_.RelativePath)|$($_.Size)|$($_.LastModified)|$($_.Hash)"
     })
-    Get-PHMStringHash -Text ($lines -join "`n")
+    [pscustomobject]@{
+        Inventory = $inventory
+        ManifestDigest = Get-PHMStringHash -Text ($lines -join "`n")
+    }
+}
+
+function Get-PHMCleanupDigest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [object]$BaselineInventory
+    )
+
+    (Get-PHMCleanupSnapshot -ProjectPath $ProjectPath -BaselineInventory $BaselineInventory).ManifestDigest
 }
 
 function Write-PHMRegistry {
@@ -1506,7 +1557,7 @@ function Invoke-PHMCheckin {
         return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='copy'; CopyResult=$copyResult; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
     }
 
-    $sourceAfter = Get-PHMProjectInventory -ProjectPath $plan.SourcePath
+    $sourceAfter = Get-PHMProjectInventory -ProjectPath $plan.SourcePath -BaselineInventory $sourceBefore
     if ($sourceBefore.ManifestDigest -ne $sourceAfter.ManifestDigest) {
         Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin-source-changed' -State 'transfer_incomplete' | Out-Null
         return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='source-changed'; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
@@ -1521,8 +1572,9 @@ function Invoke-PHMCheckin {
     New-Item -ItemType Directory -Path (Split-Path $plan.OfficialPath -Parent) -Force | Out-Null
     Move-Item -LiteralPath $plan.ReceivingPath -Destination $plan.OfficialPath -ErrorAction Stop
     Update-PHMIdentity -ProjectPath $plan.SourcePath -ComputerName $ComputerName -Operation 'checkin' -State 'cleanup_pending' -OfficialLocation $plan.OfficialPath | Out-Null
-    Add-PHMHandoffRecord -ProjectPath $plan.SourcePath -ComputerName $ComputerName -ActionLabel '归还到 T9（等待清理本机来源）' -Changes (New-PHMEmptyChanges) -ValidationResult '目标项目已完成完整性校验。' | Out-Null
-    $cleanupDigest = Get-PHMCleanupDigest -ProjectPath $plan.SourcePath
+    Add-PHMHandoffRecord -ProjectPath $plan.SourcePath -ComputerName $ComputerName -ActionLabel '归还到 T9（等待清理本机来源）' -Changes (New-PHMEmptyChanges) -ResultSummary '移动硬盘目标已完成完整性校验；本机来源仍保留，等待独立清理确认。' -ValidationResult '目标项目已完成完整性校验。' | Out-Null
+    $sourceCleanupSnapshot = Get-PHMCleanupSnapshot -ProjectPath $plan.SourcePath -BaselineInventory $sourceAfter
+    $cleanupDigest = $sourceCleanupSnapshot.ManifestDigest
     $receipt = [ordered]@{
         schema_version         = 1
         operation              = 'checkin'
@@ -1537,8 +1589,8 @@ function Invoke-PHMCheckin {
     foreach ($name in @('项目身份.json','项目交接报告.md','环境清单.json','转移凭证.json')) {
         [System.IO.File]::Copy((Join-Path $plan.SourcePath "项目交接\$name"), (Join-Path $plan.OfficialPath "项目交接\$name"), $true)
     }
-    $finalSourceDigest = Get-PHMCleanupDigest -ProjectPath $plan.SourcePath
-    $finalTargetDigest = Get-PHMCleanupDigest -ProjectPath $plan.OfficialPath
+    $finalSourceDigest = $cleanupDigest
+    $finalTargetDigest = (Get-PHMCleanupSnapshot -ProjectPath $plan.OfficialPath -BaselineInventory $targetInventory).ManifestDigest
     if ($finalSourceDigest -ne $cleanupDigest -or $finalTargetDigest -ne $cleanupDigest) {
         return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='finalization'; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; DeletedFiles=0 }
     }
@@ -1590,6 +1642,8 @@ function Complete-PHMCheckinCleanup {
         [switch]$ConfirmCleanup,
         [string[]]$ProtectedRoots = @(),
         [scriptblock]$PathSafetyProvider,
+        [scriptblock]$DeleteAction,
+        [scriptblock]$RegistryWriter,
         [string]$ExpectedDriveLetter = 'T:',
         [string]$ExpectedVolumeLabel = 'T9',
         [string]$ExpectedFileSystem = 'NTFS',
@@ -1652,13 +1706,144 @@ function Complete-PHMCheckinCleanup {
         return [pscustomobject]@{ Executed=$false; BlockedReason='来源或目标在复制后发生变化，已禁止自动清理并标记冲突。'; SourcePath=$sourceFull; TargetPath=$targetFull }
     }
 
-    Remove-Item -LiteralPath $sourceFull -Recurse -Force -ErrorAction Stop
-    $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -Operation 'checkin-cleanup' -State 'on_t9' -OfficialLocation $targetFull
-    Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -ActionLabel '完成归还并清理本机来源' -Changes (New-PHMEmptyChanges) -ValidationResult 'T9 为唯一正式完整副本。' | Out-Null
+    $recoveryPath = Join-Path $targetFull '项目交接\归还清理恢复.json'
+    $recovery = [ordered]@{
+        schema_version  = 1
+        operation       = 'checkin-cleanup'
+        state           = 'prepared'
+        project_id      = [string]$targetIdentity.project_id
+        source_path     = $sourceFull
+        target_path     = $targetFull
+        repository_root = $repositoryRoot
+        prepared_at     = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Write-PHMUtf8File -Path $recoveryPath -Content ($recovery | ConvertTo-Json -Depth 5)
+
+    if (-not $DeleteAction) { $DeleteAction = { param($path) Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop } }
+    & $DeleteAction $sourceFull | Out-Null
+
+    $registryPath = $null
+    try {
+        $registryPath = Get-PHMRegistryPathFromRepository -PortableRepositoryRoot $repositoryRoot
+        $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -Operation 'checkin-cleanup' -State 'on_t9' -OfficialLocation $targetFull
+        Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $env:COMPUTERNAME -ActionLabel '完成归还并清理本机来源' -Changes (New-PHMEmptyChanges) -ResultSummary '本机来源已按独立确认清理；移动硬盘目标为正式完整副本。' -ValidationResult 'T9 为唯一正式完整副本。' | Out-Null
+        $record = [pscustomobject]@{ projectId=[string]$identity.project_id; projectName=[string]$identity.project_name; state='on_t9'; location=$targetFull; updatedAt=(Get-Date).ToUniversalTime().ToString('o') }
+        if (-not $RegistryWriter) { $RegistryWriter = { param($path,$item) Write-PHMRegistry -RegistryPath $path -Record $item } }
+        & $RegistryWriter $registryPath $record | Out-Null
+        Remove-Item -LiteralPath $recoveryPath -Force -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{
+            Executed=$true; DeletedSource=$true; SourcePath=$sourceFull; TargetPath=$targetFull; State='pending_repair'
+            RegistryPath=$registryPath; RegistryState='pending_repair'; RegistryError=$_.Exception.Message; Recoverable=$true
+        }
+    }
+    [pscustomobject]@{
+        Executed=$true; DeletedSource=$true; SourcePath=$sourceFull; TargetPath=$targetFull; State='on_t9'
+        RegistryPath=$registryPath; RegistryState='on_t9'; Recoverable=$false
+    }
+}
+
+function Repair-PHMCheckinCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PortableTargetPath,
+        [Parameter(Mandatory)][string]$PortableRepositoryRoot,
+        [Parameter(Mandatory)]$DriveInfo,
+        [scriptblock]$PathSafetyProvider,
+        [scriptblock]$RegistryWriter,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [string]$ExpectedDriveLetter = 'T:',
+        [string]$ExpectedVolumeLabel = 'T9',
+        [string]$ExpectedFileSystem = 'NTFS',
+        [string]$ExpectedFriendlyName = 'Samsung PSSD T9',
+        [Parameter(Mandatory)][string]$ExpectedVolumeSerial,
+        [Parameter(Mandatory)][string]$ExpectedDeviceId
+    )
+
+    $targetFull = (Get-Item -LiteralPath $PortableTargetPath -ErrorAction Stop).FullName
+    $markerPath = Join-Path $targetFull '项目交接\归还清理恢复.json'
+    $marker = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([int]$marker.schema_version -ne 1) { throw '不支持的归还清理恢复记录版本。' }
+    if ([string]$marker.operation -ne 'checkin-cleanup' -or [string]$marker.state -ne 'prepared') {
+        throw '归还清理恢复记录的操作或状态无效。'
+    }
+
+    $repositoryRoot = [System.IO.Path]::GetFullPath($PortableRepositoryRoot).TrimEnd('\')
+    $markerRepository = [System.IO.Path]::GetFullPath([string]$marker.repository_root).TrimEnd('\')
+    $markerTarget = [System.IO.Path]::GetFullPath([string]$marker.target_path)
+    $sourceFull = [System.IO.Path]::GetFullPath([string]$marker.source_path)
+    if (-not $repositoryRoot.Equals($markerRepository, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $targetFull.Equals($markerTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw '归还清理恢复记录与指定仓库或移动硬盘项目不一致。'
+    }
+
+    $receiptPath = Join-Path $targetFull '项目交接\转移凭证.json'
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $receiptSource = [System.IO.Path]::GetFullPath([string]$receipt.source_path)
+    $receiptTarget = [System.IO.Path]::GetFullPath([string]$receipt.target_path)
+    if ([int]$receipt.schema_version -ne 1 -or [string]$receipt.operation -ne 'checkin' -or
+        [string]$marker.project_id -ne [string]$receipt.project_id -or
+        -not $sourceFull.Equals($receiptSource, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $targetFull.Equals($receiptTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw '归还清理恢复记录与现有 checkin 转移凭证不一致。'
+    }
+
+    $driveValidation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName -ExpectedVolumeSerial $ExpectedVolumeSerial -ExpectedDeviceId $ExpectedDeviceId
+    if (-not $driveValidation.IsValid) { throw "设备或磁盘校验失败：$($driveValidation.Blockers -join '；')" }
+    if (-not (Test-PHMPathOnValidatedDrive -Path $repositoryRoot -DriveInfo $DriveInfo) -or
+        -not (Test-PHMPathOnValidatedDrive -Path $targetFull -DriveInfo $DriveInfo)) {
+        throw '恢复目标或项目仓库不在已验证 DriveInfo.DriveLetter 所指向的卷上。'
+    }
+
+    $pausedRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot '暂停项目')).TrimEnd('\')
+    foreach ($portablePath in @($repositoryRoot, $pausedRoot, $targetFull)) {
+        if (-not (Test-PHMPathChainSafe -Path $portablePath -PathSafetyProvider $PathSafetyProvider)) {
+            throw "恢复路径链包含重解析点或无法验证：$portablePath"
+        }
+    }
+    $targetParent = [System.IO.Path]::GetFullPath((Split-Path $targetFull -Parent)).TrimEnd('\')
+    if (-not $targetParent.Equals($pausedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $targetFull.Equals($pausedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw '恢复目标必须是 PortableRepositoryRoot\暂停项目 下的直接子目录。'
+    }
+
+    if (Test-Path -LiteralPath $sourceFull -PathType Container) {
+        return [pscustomobject]@{
+            Executed=$false; Repaired=$false; DeletedSource=$false; TargetPath=$targetFull; State='cleanup_pending'
+            RegistryState='not_started'; BlockedReason='本机来源仍存在；请重新执行正常归还清理流程。'
+        }
+    }
+
+    $identityPath = Join-Path $targetFull '项目交接\项目身份.json'
+    $identity = Get-Content -LiteralPath $identityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]$identity.project_id -ne [string]$marker.project_id) { throw '移动硬盘项目身份与归还清理恢复记录不一致。' }
+
+    $officialLocation = [System.IO.Path]::GetFullPath([string]$identity.official_location)
+    $alreadyFinal = [string]$identity.state -eq 'on_t9' -and
+        [string]$identity.last_operation -eq 'checkin-cleanup' -and
+        $officialLocation.Equals($targetFull, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $alreadyFinal) {
+        $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $ComputerName -Operation 'checkin-cleanup' -State 'on_t9' -OfficialLocation $targetFull
+    }
+
+    $reportPath = Join-Path $targetFull '项目交接\项目交接报告.md'
+    $report = Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop
+    $resultSummary = '本机来源已按独立确认清理；移动硬盘目标为正式完整副本。'
+    if ($report -notmatch [regex]::Escape("- 结果：$resultSummary")) {
+        Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $ComputerName -ActionLabel '完成归还并清理本机来源' -Changes (New-PHMEmptyChanges) -ResultSummary $resultSummary -ValidationResult 'T9 为唯一正式完整副本。' | Out-Null
+    }
+
     $registryPath = Get-PHMRegistryPathFromRepository -PortableRepositoryRoot $repositoryRoot
     $record = [pscustomobject]@{ projectId=[string]$identity.project_id; projectName=[string]$identity.project_name; state='on_t9'; location=$targetFull; updatedAt=(Get-Date).ToUniversalTime().ToString('o') }
-    Write-PHMRegistry -RegistryPath $registryPath -Record $record | Out-Null
-    [pscustomobject]@{ Executed=$true; DeletedSource=$true; SourcePath=$sourceFull; TargetPath=$targetFull; State='on_t9'; RegistryPath=$registryPath }
+    if (-not $RegistryWriter) { $RegistryWriter = { param($path,$item) Write-PHMRegistry -RegistryPath $path -Record $item } }
+    & $RegistryWriter $registryPath $record | Out-Null
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+
+    [pscustomobject]@{
+        Executed=$true; Repaired=$true; DeletedSource=$true; TargetPath=$targetFull; State='on_t9'
+        RegistryPath=$registryPath; RegistryState='on_t9'
+    }
 }
 
 function New-PHMDeterministicProjectId {
@@ -1758,7 +1943,7 @@ function New-PHMCheckoutPlan {
     $identitySummary = Get-PHMIdentitySummary -ProjectPath $sourcePath
     $needsAdoption = (-not $identitySummary.Managed -and -not $identitySummary.Error)
     $projectId = if ($identitySummary.ProjectId) { $identitySummary.ProjectId } else { New-PHMDeterministicProjectId -ProjectPath $sourcePath }
-    $inventory = Get-PHMProjectInventory -ProjectPath $sourcePath
+    $inventory = Get-PHMProjectInventory -ProjectPath $sourcePath -MetadataOnly
     $requiredBytes = [long]($inventory.TotalBytes + [math]::Max(100MB, [math]::Ceiling($inventory.TotalBytes * 0.1)))
     $driveValidation = Test-PHMPortableDrive -Actual $DriveInfo -ExpectedDriveLetter $ExpectedDriveLetter -ExpectedVolumeLabel $ExpectedVolumeLabel -ExpectedFileSystem $ExpectedFileSystem -ExpectedFriendlyName $ExpectedFriendlyName -ExpectedVolumeSerial $ExpectedVolumeSerial -ExpectedDeviceId $ExpectedDeviceId
     $currentRoot = [System.IO.Path]::GetFullPath($LocalCurrentRoot)
@@ -1851,7 +2036,7 @@ function New-PHMCheckoutPlan {
         Unreadable          = @($inventory.Unreadable)
         Blockers            = @($blockers)
         ExpectedActions     = @($expectedActions)
-        ExpectedResult      = '确认后复制到本机、校验并提交为正式目录；T9 来源保留，需第二次确认后才清理。'
+        ExpectedResult      = '确认后复制到本机、校验并提交为正式目录；T9 来源继续保留，如需释放空间，之后另行发布删除移动硬盘中该项目的指令。'
     }
 }
 
@@ -1947,14 +2132,14 @@ function Write-PHMContinuePrompt {
     New-Item -ItemType Directory -Path $handoffRoot -Force | Out-Null
     $path = Join-Path $handoffRoot '继续项目提示词.md'
     $content = @'
-# 在新 Codex 任务中继续此项目
+# 在新的 AI 软件或本地开发环境中继续此项目
 
 请把当前项目文件夹作为工作区，并按以下顺序继续：
 
 1. 先完整阅读 `项目交接/项目交接报告.md`，确认项目目标、不能改变的约束、当前任务、未完成事项、下一步和最后验证结果。
 2. 再读取 `项目交接/环境清单.json`，检查 Node、Python、项目缓存和离线依赖的现状。
 3. 不要假定复制来的 `node_modules`、`.venv`、缓存或离线依赖必然可直接运行；先执行环境检查，并按锁文件给出的恢复命令重建或验证环境。
-4. 检查工作区和交接记录是否一致，然后继续上次未完成工作。
+4. 检查工作区和交接记录是否一致，然后继续上次未完成工作；不要重复已经完成并验证通过的事项。
 5. 完成新的阶段后，更新项目交接报告、环境清单和验证结果。
 '@
     Write-PHMUtf8File -Path $path -Content $content
@@ -1986,6 +2171,8 @@ function Complete-PHMCheckoutFinalization {
         [Parameter(Mandatory)][string]$PortableRepositoryRoot,
         [Parameter(Mandatory)][string]$ProjectId,
         [switch]$NeedsAdoption,
+        [object]$PortableBaselineInventory,
+        [object]$LocalBaselineInventory,
         [scriptblock]$RegistryWriter,
         [string]$ComputerName = $env:COMPUTERNAME
     )
@@ -2010,11 +2197,13 @@ function Complete-PHMCheckoutFinalization {
     $environment = Test-PHMProjectEnvironment -ProjectPath $targetPath
     $continuePromptPath = Write-PHMContinuePrompt -ProjectPath $targetPath
     Update-PHMIdentity -ProjectPath $targetPath -ComputerName $ComputerName -Operation 'checkout' -State 'cleanup_pending' -OfficialLocation $targetPath | Out-Null
-    Add-PHMHandoffRecord -ProjectPath $targetPath -ComputerName $ComputerName -ActionLabel '从 T9 借出（等待清理 T9 来源）' -Changes (New-PHMEmptyChanges) -ValidationResult '本机目标已完成完整性校验；T9 来源仍保留。' | Out-Null
+    Add-PHMHandoffRecord -ProjectPath $targetPath -ComputerName $ComputerName -ActionLabel '从 T9 借出（等待清理 T9 来源）' -Changes (New-PHMEmptyChanges) -ResultSummary '本机目标已完成完整性校验；移动硬盘来源仍保留，等待独立清理确认。' -ValidationResult '本机目标已完成完整性校验；T9 来源仍保留。' | Out-Null
     Copy-PHMCheckoutHandoffFiles -LocalProjectPath $targetPath -PortableProjectPath $sourcePath
 
-    $cleanupDigest = Get-PHMCleanupDigest -ProjectPath $targetPath
-    if ((Get-PHMCleanupDigest -ProjectPath $sourcePath) -ne $cleanupDigest) { throw '两端最终化摘要不一致。' }
+    $localCleanupSnapshot = Get-PHMCleanupSnapshot -ProjectPath $targetPath -BaselineInventory $LocalBaselineInventory
+    $portableCleanupSnapshot = Get-PHMCleanupSnapshot -ProjectPath $sourcePath -BaselineInventory $PortableBaselineInventory
+    $cleanupDigest = $localCleanupSnapshot.ManifestDigest
+    if ($portableCleanupSnapshot.ManifestDigest -ne $cleanupDigest) { throw '两端最终化摘要不一致。' }
     $receipt = [ordered]@{
         schema_version=1; operation='checkout'; project_id=$ProjectId
         repository_root=$repositoryRoot; source_path=$sourcePath; target_path=$targetPath
@@ -2126,7 +2315,7 @@ function Invoke-PHMCheckout {
         return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='copy'; CopyResult=$copyResult; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; CleanupRequired=$false; DeletedFiles=0 }
     }
 
-    $sourceAfter = Get-PHMProjectInventory -ProjectPath $plan.SourcePath
+    $sourceAfter = Get-PHMProjectInventory -ProjectPath $plan.SourcePath -BaselineInventory $sourceBefore
     if ($sourceBefore.ManifestDigest -ne $sourceAfter.ManifestDigest) {
         return [pscustomobject]@{ Executed=$false; Verified=$false; FailureStage='source-changed'; OfficialPath=$plan.OfficialPath; ReceivingPath=$plan.ReceivingPath; CleanupRequired=$false; DeletedFiles=0 }
     }
@@ -2155,7 +2344,7 @@ function Invoke-PHMCheckout {
     Write-PHMUtf8File -Path $recoveryMarkerPath -Content ($recoveryMarker | ConvertTo-Json -Depth 5)
     try {
         if ($FinalizationAction) { & $FinalizationAction $plan.OfficialPath $plan.SourcePath | Out-Null }
-        $finalized = Complete-PHMCheckoutFinalization -PortableSourcePath $plan.SourcePath -LocalTargetPath $plan.OfficialPath -PortableRepositoryRoot $repositoryRoot -ProjectId $plan.ProjectId -NeedsAdoption:$plan.NeedsAdoption -RegistryWriter $RegistryWriter -ComputerName $ComputerName
+        $finalized = Complete-PHMCheckoutFinalization -PortableSourcePath $plan.SourcePath -LocalTargetPath $plan.OfficialPath -PortableRepositoryRoot $repositoryRoot -ProjectId $plan.ProjectId -NeedsAdoption:$plan.NeedsAdoption -PortableBaselineInventory $sourceAfter -LocalBaselineInventory $targetInventory -RegistryWriter $RegistryWriter -ComputerName $ComputerName
     }
     catch {
         return [pscustomobject]@{
@@ -2171,7 +2360,7 @@ function Invoke-PHMCheckout {
         Verification=$verification; CopyResult=$copyResult; RegistryPath=$finalized.RegistryPath
         Environment=$finalized.Environment; EnvironmentPath=$finalized.EnvironmentPath; ContinuePromptPath=$finalized.ContinuePromptPath
         CleanupRequired=$true; SourceStillExists=$true; DeletedFiles=0
-        CleanupPrompt="本机项目已经完整校验。确认两份均未变化后，可清理 T9 来源：$($plan.SourcePath)"
+        CleanupPrompt="本机项目已经完整校验，T9 来源仍保留：$($plan.SourcePath)。如需清理，请另行发布删除移动硬盘中该项目的指令；届时不再比较本机与 T9 的内容摘要。"
     }
 }
 
@@ -2180,12 +2369,12 @@ function Get-PHMCheckoutCleanupSummary {
     param([Parameter(Mandatory)][string]$ProjectPath)
 
     if (-not (Test-Path -LiteralPath $ProjectPath -PathType Container)) { return $null }
-    $inventory = Get-PHMProjectInventory -ProjectPath $ProjectPath
+    $inventory = Get-PHMProjectInventory -ProjectPath $ProjectPath -MetadataOnly
     [pscustomobject]@{
         Path           = (Get-Item -LiteralPath $ProjectPath).FullName
         FileCount      = $inventory.FileCount
         TotalBytes     = $inventory.TotalBytes
-        ManifestDigest = Get-PHMCleanupDigest -ProjectPath $ProjectPath
+        ManifestDigest = $null
     }
 }
 
@@ -2226,7 +2415,7 @@ function Complete-PHMCheckoutCleanup {
             Executed=$false; RequiresConfirmation=$true; PortableSourcePath=$sourceFull; LocalTargetPath=$targetFull
             ReceiptPath=(Join-Path $targetFull '项目交接\转移凭证.json'); SourceSummary=$sourceSummary; TargetSummary=$targetSummary
             PortableRepositoryRoot=$repositoryRoot; DriveValidation=$driveValidation
-            ExpectedResult='复核磁盘身份、仓库边界、借出回执、项目编号和两端摘要后，只删除 T9 来源；本机项目转为 local_active。'
+            ExpectedResult='这是独立的 T9 项目删除操作；复核磁盘身份、仓库边界、借出回执、项目编号和路径后删除 T9 旧来源，不比较本机与 T9 的内容摘要。'
         }
     }
     if ($sourceFull.Equals($targetFull, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -2290,20 +2479,16 @@ function Complete-PHMCheckoutCleanup {
         -not ([System.IO.Path]::GetFullPath([string]$targetIdentity.official_location)).Equals($targetFull, [System.StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{ Executed=$false; BlockedReason='项目编号不一致。'; PortableSourcePath=$sourceFull; LocalTargetPath=$targetFull; DeletedFiles=0 }
     }
-    if ($sourceSummary.ManifestDigest -ne $targetReceipt.source_manifest_digest -or $targetSummary.ManifestDigest -ne $targetReceipt.source_manifest_digest) {
-        return [pscustomobject]@{ Executed=$false; BlockedReason='任一副本在复制后发生变化，已禁止清理并保留双份。'; PortableSourcePath=$sourceFull; LocalTargetPath=$targetFull; DeletedFiles=0 }
-    }
-
     $deletedFiles = [int]$sourceSummary.FileCount
-    $sourceInventoryBeforeCleanup = Get-PHMProjectInventory -ProjectPath $sourceFull
+    $sourceInventoryBeforeCleanup = Get-PHMProjectInventory -ProjectPath $sourceFull -MetadataOnly
     try {
         $identity = Update-PHMIdentity -ProjectPath $targetFull -ComputerName $ComputerName -Operation 'checkout-cleanup-prepare' -State 'local_active' -OfficialLocation $targetFull
-        Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $ComputerName -ActionLabel '准备完成借出并清理 T9 来源' -Changes (New-PHMEmptyChanges) -ValidationResult '两端回执、身份、路径和完整摘要已复核；本机已先转为可恢复活动状态。' | Out-Null
+        Add-PHMHandoffRecord -ProjectPath $targetFull -ComputerName $ComputerName -ActionLabel '准备完成借出并清理 T9 来源' -Changes (New-PHMEmptyChanges) -ResultSummary '本机项目已转为活动状态；移动硬盘旧来源正在按独立确认清理。' -ValidationResult '设备、回执、身份和路径已复核；用户已独立确认删除 T9 旧副本，本机已先转为可恢复活动状态。' | Out-Null
         $recoveryRecord = [ordered]@{
             schema_version=1; operation='checkout-cleanup'; project_id=[string]$identity.project_id
             repository_root=$repositoryRoot; portable_source_path=$sourceFull; local_target_path=$targetFull
             source_manifest_digest=[string]$sourceReceipt.source_manifest_digest
-            source_files=@($sourceInventoryBeforeCleanup.Files | ForEach-Object { [ordered]@{ relative_path=$_.RelativePath; size=[long]$_.Size; sha256=[string]$_.Hash } })
+            source_files=@($sourceInventoryBeforeCleanup.Files | ForEach-Object { [ordered]@{ relative_path=$_.RelativePath; size=[long]$_.Size; last_modified=[string]$_.LastModified; sha256=[string]$_.Hash } })
             state='prepared'; prepared_at=(Get-Date).ToUniversalTime().ToString('o')
         }
         Write-PHMUtf8File -Path (Join-Path $targetFull '项目交接\借出清理恢复.json') -Content ($recoveryRecord | ConvertTo-Json -Depth 5)
@@ -2388,7 +2573,15 @@ function Repair-PHMCheckoutCleanup {
 
     $deletedSource = $false
     if (Test-Path -LiteralPath $sourceFull -PathType Container) {
-        if (-not $InventoryProvider) { $InventoryProvider = { param($path) Get-PHMProjectInventory -ProjectPath $path } }
+        $requiresFullHash = @($marker.source_files | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.sha256) }).Count -gt 0
+        if (-not $InventoryProvider) {
+            $InventoryProvider = if ($requiresFullHash) {
+                { param($path) Get-PHMProjectInventory -ProjectPath $path }
+            }
+            else {
+                { param($path) Get-PHMProjectInventory -ProjectPath $path -MetadataOnly }
+            }
+        }
         $remainingInventory = & $InventoryProvider $sourceFull
         if (-not $remainingInventory) { throw '无法取得 T9 来源残余内容清单，禁止重试删除。' }
         if (@($remainingInventory.Unreadable).Count -gt 0) { throw 'T9 来源残余内容包含不可读文件或目录，禁止重试删除。' }
@@ -2400,7 +2593,21 @@ function Repair-PHMCheckoutCleanup {
             $key = $remainingFile.RelativePath.ToLowerInvariant()
             if (-not $originalFiles.ContainsKey($key)) { throw "T9 来源残余内容出现新增文件：$($remainingFile.RelativePath)" }
             $original = $originalFiles[$key]
-            if ([long]$remainingFile.Size -ne [long]$original.size -or [string]$remainingFile.Hash -ne [string]$original.sha256) {
+            $sizeChanged = [long]$remainingFile.Size -ne [long]$original.size
+            $modifiedChanged = $false
+            if (-not [string]::IsNullOrWhiteSpace([string]$original.last_modified)) {
+                $originalModified = if ($original.last_modified -is [datetime]) {
+                    ([datetime]$original.last_modified).ToUniversalTime()
+                }
+                else {
+                    [datetime]::Parse([string]$original.last_modified, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+                }
+                $remainingModified = [datetime]::Parse([string]$remainingFile.LastModified, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+                $modifiedChanged = $remainingModified.Ticks -ne $originalModified.Ticks
+            }
+            $hashChanged = -not [string]::IsNullOrWhiteSpace([string]$original.sha256) -and
+                [string]$remainingFile.Hash -ne [string]$original.sha256
+            if ($sizeChanged -or $modifiedChanged -or $hashChanged) {
                 throw "T9 来源残余文件发生变化：$($remainingFile.RelativePath)"
             }
         }
@@ -2421,4 +2628,4 @@ function Repair-PHMCheckoutCleanup {
     }
 }
 
-Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig, Get-PHMProjectProcessPlan, Suspend-PHMProject, Test-PHMPortableDrive, Get-PHMPortableDriveInfo, Register-PHMPortableDevice, Get-PHMProjectInventory, New-PHMCheckinPlan, Invoke-PHMCheckin, Test-PHMDeletionPath, Complete-PHMCheckinCleanup, New-PHMCheckoutPlan, Test-PHMProjectEnvironment, Write-PHMContinuePrompt, Invoke-PHMCheckout, Repair-PHMCheckoutFinalization, Complete-PHMCheckoutCleanup, Repair-PHMCheckoutCleanup
+Export-ModuleMember -Function Get-PHMVersion, Get-PHMMenu, Get-PHMProjectOverview, Initialize-PHMProject, Resume-PHMProject, Save-PHMCheckpoint, Read-PHMConfig, Get-PHMProjectProcessPlan, Suspend-PHMProject, Test-PHMPortableDrive, Get-PHMPortableDriveInfo, Register-PHMPortableDevice, Get-PHMProjectInventory, New-PHMCheckinPlan, Invoke-PHMCheckin, Test-PHMDeletionPath, Complete-PHMCheckinCleanup, Repair-PHMCheckinCleanup, New-PHMCheckoutPlan, Test-PHMProjectEnvironment, Write-PHMContinuePrompt, Invoke-PHMCheckout, Repair-PHMCheckoutFinalization, Complete-PHMCheckoutCleanup, Repair-PHMCheckoutCleanup

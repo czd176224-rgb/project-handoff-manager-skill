@@ -119,7 +119,7 @@ if ($Action -eq 'checkin') {
         $cleanup = Complete-PHMCheckinCleanup -SourcePath $ProjectPath -TargetPath $TargetPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ConfirmCleanup -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
         [pscustomobject]@{
             safeMode=$true; executed=[bool]$cleanup.Executed; action='checkin-cleanup'
-            message=if($cleanup.Executed){'本机来源已清理，T9 是唯一正式完整副本。'}else{'未清理来源；请查看阻断原因。'}
+            message=if($cleanup.Recoverable){'本机来源已清理，但移动硬盘项目状态尚未完成收尾；请对 T9 目标项目运行 repair。'}elseif($cleanup.Executed){'本机来源已清理，T9 是唯一正式完整副本。'}else{'未清理来源；请查看阻断原因。'}
             result=$cleanup
         } | ConvertTo-Json -Depth 12
         exit 0
@@ -155,9 +155,14 @@ if ($Action -eq 'repair') {
     if (-not $expectedVolumeSerial -or -not $expectedDeviceId) { throw '操作 repair 缺少本机 T9 设备信任记录。' }
     $markerPath = if ($portableConfig -and $portableConfig.deviceMarkerPath) { [string]$portableConfig.deviceMarkerPath } else { Join-Path $PortableRepositoryRoot '..\管理资料\项目管家设备.json' }
     if (-not $DriveInfo) { $DriveInfo = Get-PHMPortableDriveInfo -DriveLetter $expectedLetter -DeviceMarkerPath $markerPath }
+    $checkinCleanupMarker = Join-Path $TargetPath '项目交接\归还清理恢复.json'
     $finalizationMarker = Join-Path $TargetPath '项目交接\借出最终化恢复.json'
     $cleanupMarker = Join-Path $TargetPath '项目交接\借出清理恢复.json'
-    if (Test-Path -LiteralPath $finalizationMarker -PathType Leaf) {
+    if (Test-Path -LiteralPath $checkinCleanupMarker -PathType Leaf) {
+        $repairKind = 'checkin-cleanup'
+        $repairResult = Repair-PHMCheckinCleanup -PortableTargetPath $TargetPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ComputerName $ComputerName -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
+    }
+    elseif (Test-Path -LiteralPath $finalizationMarker -PathType Leaf) {
         $repairKind = 'checkout-finalization'
         $repairResult = Repair-PHMCheckoutFinalization -LocalTargetPath $TargetPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ComputerName $ComputerName -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
     }
@@ -165,10 +170,10 @@ if ($Action -eq 'repair') {
         $repairKind = 'checkout-cleanup'
         $repairResult = Repair-PHMCheckoutCleanup -LocalTargetPath $TargetPath -PortableRepositoryRoot $PortableRepositoryRoot -DriveInfo $DriveInfo -ComputerName $ComputerName -ExpectedDriveLetter $expectedLetter -ExpectedVolumeLabel $expectedLabel -ExpectedFileSystem $expectedFileSystem -ExpectedFriendlyName $expectedFriendlyName -ExpectedVolumeSerial $expectedVolumeSerial -ExpectedDeviceId $expectedDeviceId
     }
-    else { throw '本机项目中没有可恢复的借出最终化或借出清理记录。' }
+    else { throw '指定项目中没有可恢复的归还清理、借出最终化或借出清理记录。' }
     [pscustomobject]@{
         safeMode=$true; executed=[bool]$repairResult.Executed; action='repair'; repairKind=$repairKind
-        message=if($repairKind -eq 'checkout-cleanup'){'借出清理恢复已完成；本机项目保持活动状态，T9 来源已清理并完成登记。'}else{'借出最终化恢复已完成；T9 来源仍保留，需按正常清理步骤单独确认。'}
+        message=if(-not $repairResult.Executed){"恢复未执行：$($repairResult.BlockedReason)"}elseif($repairKind -eq 'checkin-cleanup'){'归还清理恢复已完成；移动硬盘项目已完成身份和登记更新。'}elseif($repairKind -eq 'checkout-cleanup'){'借出清理恢复已完成；本机项目保持活动状态，T9 来源已清理并完成登记。'}else{'借出最终化恢复已完成；T9 来源仍保留，需按正常清理步骤单独确认。'}
         result=$repairResult
     } | ConvertTo-Json -Depth 20
     exit 0

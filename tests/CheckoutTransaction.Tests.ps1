@@ -61,7 +61,7 @@ Describe '事务式从 T9 借出' {
         Test-Path -LiteralPath (Join-Path $result.OfficialPath '项目交接\转移凭证.json')|Should -BeTrue
     }
 
-    It '确认清理且两份未变化时删除 T9 来源并将本机状态更新为 local_active' {
+    It '独立确认清理时删除 T9 旧来源并将本机状态更新为 local_active' {
         $fixture=New-CheckoutFixture -Name '完成借出'
         $transfer=Invoke-PHMCheckout -PortableProjectPath $fixture.Source -PortableRepositoryRoot $fixture.Repository -LocalCurrentRoot $fixture.CurrentRoot -LocalReceivingRoot $fixture.ReceivingRoot -DriveInfo (New-CheckoutDrive) -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmTransfer
 
@@ -75,16 +75,15 @@ Describe '事务式从 T9 借出' {
         $identity.official_location|Should -Be (Get-Item $transfer.OfficialPath).FullName
     }
 
-    It '等待清理期间任一副本增加材料时阻止删除 T9 来源' {
+    It '本机继续工作后仍可通过独立确认清理 T9 旧来源' {
         $fixture=New-CheckoutFixture -Name '变化借出'
         $transfer=Invoke-PHMCheckout -PortableProjectPath $fixture.Source -PortableRepositoryRoot $fixture.Repository -LocalCurrentRoot $fixture.CurrentRoot -LocalReceivingRoot $fixture.ReceivingRoot -DriveInfo (New-CheckoutDrive) -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmTransfer
         Set-Content -LiteralPath (Join-Path $transfer.OfficialPath '输入资料\新材料.txt') -Value 'new' -Encoding utf8
 
         $result=Complete-PHMCheckoutCleanup -PortableSourcePath $fixture.Source -LocalTargetPath $transfer.OfficialPath -PortableRepositoryRoot $fixture.Repository -DriveInfo (New-CheckoutDrive) -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmCleanup
 
-        $result.Executed|Should -BeFalse
-        $result.BlockedReason|Should -Match '发生变化'
-        Test-Path -LiteralPath $fixture.Source|Should -BeTrue
+        $result.Executed|Should -BeTrue
+        Test-Path -LiteralPath $fixture.Source|Should -BeFalse
         Test-Path -LiteralPath $transfer.OfficialPath|Should -BeTrue
     }
 }

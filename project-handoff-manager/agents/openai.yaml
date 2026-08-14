@@ -1,4 +1,4 @@
 interface:
   display_name: "项目管家"
   short_description: "暂停、归还、借出并跨电脑继续完整项目"
-  default_prompt: "使用 $project-handoff-manager 先显示项目总览和四项中文操作菜单，再按我的选择安全处理项目。"
+  default_prompt: "使用 $project-handoff-manager 先解析脚本 JSON，再用简洁中文显示项目总览和四项操作菜单；不要直接展示原始 JSON，并在每次结果末尾给出唯一明确的下一步。"

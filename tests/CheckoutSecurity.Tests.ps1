@@ -290,13 +290,17 @@ Describe '借出与清理安全边界' {
         Test-Path -LiteralPath (Join-Path $transfer.OfficialPath '项目交接\借出清理恢复.json') | Should -BeFalse
     }
 
-    It '部分删除后残余文件内容变化时恢复阻断' {
+    It '部分删除后残余文件同大小但修改时间变化时恢复阻断' {
         $fixture = New-SecureCheckoutFixture -Name '残余内容变化'
-        Set-Content -LiteralPath (Join-Path $fixture.Source 'keep.txt') -Value 'original' -Encoding utf8
+        $keepPath = Join-Path $fixture.Source 'keep.txt'
+        Set-Content -LiteralPath $keepPath -Value 'AAAA' -Encoding utf8
         $transfer = Invoke-PHMCheckout -PortableProjectPath $fixture.Source -PortableRepositoryRoot $fixture.Repository -LocalCurrentRoot $fixture.CurrentRoot -LocalReceivingRoot $fixture.ReceivingRoot -DriveInfo (New-SecureCheckoutDrive) -LocalFreeBytes 100GB -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmTransfer
         $failedDelete = { param($path) Remove-Item -LiteralPath (Join-Path $path 'data.txt') -Force; throw 'partial' }
         Complete-PHMCheckoutCleanup -PortableSourcePath $fixture.Source -LocalTargetPath $transfer.OfficialPath -PortableRepositoryRoot $fixture.Repository -DriveInfo (New-SecureCheckoutDrive) -ExpectedVolumeSerial TEST -ExpectedDeviceId test -ConfirmCleanup -DeleteAction $failedDelete | Out-Null
-        Set-Content -LiteralPath (Join-Path $fixture.Source 'keep.txt') -Value 'changed' -Encoding utf8
+        $sizeBefore = (Get-Item -LiteralPath $keepPath).Length
+        Set-Content -LiteralPath $keepPath -Value 'BBBB' -Encoding utf8
+        (Get-Item -LiteralPath $keepPath).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddMinutes(1)
+        (Get-Item -LiteralPath $keepPath).Length | Should -Be $sizeBefore
 
         { Repair-PHMCheckoutCleanup -LocalTargetPath $transfer.OfficialPath -PortableRepositoryRoot $fixture.Repository -DriveInfo (New-SecureCheckoutDrive) -ExpectedVolumeSerial TEST -ExpectedDeviceId test } | Should -Throw '*残余文件发生变化*'
         Test-Path -LiteralPath $fixture.Source | Should -BeTrue

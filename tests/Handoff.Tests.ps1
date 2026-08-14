@@ -52,7 +52,7 @@ Describe '继续项目与交接信息同步' {
         $result.EnvironmentPath | Should -Be (Join-Path $project '项目交接\环境清单.json')
     }
 
-    It '继续和记录进度都会追加可供新 Codex 任务读取的交接记录' {
+    It '继续和记录进度都会追加可供任意 AI 软件读取的交接记录' {
         $project = Join-Path $TestDrive '记录项目'
         New-Item -ItemType Directory -Path $project -Force | Out-Null
         Initialize-PHMProject -ProjectPath $project -ComputerName 'TEST-PC' | Out-Null

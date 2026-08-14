@@ -94,7 +94,7 @@ try {
 
     $module = Import-Module $modulePath -Force -PassThru
     $version = Get-PHMVersion
-    if ($version.Version -ne '1.0.0') { throw "版本错误：期望 1.0.0，实际 $($version.Version)" }
+    if ($version.Version -ne '1.1.1') { throw "版本错误：期望 1.1.1，实际 $($version.Version)" }
     $expectedMenu = @('开始或继续当前项目','暂停当前项目','将当前项目归还到 T9','从 T9 借出项目到本机')
     $menu = @(Get-PHMMenu)
     if ($menu.Count -ne 4 -or (Compare-Object -ReferenceObject $expectedMenu -DifferenceObject @($menu.Name))) {
@@ -109,11 +109,11 @@ try {
     if ($entry.operations.Count -ne 4 -or -not $entry.safeMode) { throw '入口菜单结果无效。' }
 
     if (-not $Quiet) {
-        Write-Host "安装验证通过：project-handoff-manager 1.0.0"
+        Write-Host "安装验证通过：project-handoff-manager 1.1.1"
         Write-Host "Skill 路径：$SkillPath"
         Write-Host '目录、无污染、隐私扫描、UTF-8 BOM、模块导入、四项菜单和入口执行均正常。'
     }
-    [pscustomobject]@{ Valid=$true; Version='1.0.0'; SkillPath=$SkillPath; MenuCount=4 }
+    [pscustomobject]@{ Valid=$true; Version='1.1.1'; SkillPath=$SkillPath; MenuCount=4 }
 }
 catch {
     throw "安装验证失败：$($_.Exception.Message)"

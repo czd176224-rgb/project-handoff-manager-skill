@@ -32,7 +32,7 @@ Describe '借出后的环境与依赖恢复检查' {
         $result.OfflineDependencies.FileCount|Should -Be 1
     }
 
-    It '生成可直接交给新 Codex 任务的中文继续提示词' {
+    It '生成可直接交给任意 AI 软件的中文继续提示词' {
         $project=Join-Path $TestDrive '提示词项目'
         New-Item -ItemType Directory -Path $project -Force|Out-Null
         Initialize-PHMProject -ProjectPath $project|Out-Null
